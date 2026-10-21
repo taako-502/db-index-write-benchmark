@@ -1,0 +1,37 @@
+name: test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mongodb:
+        image: mongo:8.0.16
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'quit(db.adminCommand({ping:1}).ok ? 0 : 1)'"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.0'
+          cache: true
+      - run: go vet ./...
+      - run: go test -race ./...
+        env:
+          BENCH_TEST_URI: mongodb://127.0.0.1:27017
+      - name: CLI smoke test
+        run: go run ./cmd/bench -sizes 101 -repeats 1 -batch 30 -cooldown 0s -out results/smoke
+        env:
+          MONGODB_URI: mongodb://127.0.0.1:27017
+      - name: Regenerate report offline
+        run: go run ./cmd/bench -report results/smoke/results.json -out results/regenerated
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smoke-report
+          path: results/

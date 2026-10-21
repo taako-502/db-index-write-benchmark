@@ -1,0 +1,17 @@
+services:
+  mongodb:
+    image: mongo:8.0.16
+    ports:
+      - "127.0.0.1:27018:27017"
+    command: ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "1"]
+    cpus: 2
+    mem_limit: 3g
+    volumes:
+      - benchmark-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "quit(db.adminCommand({ping:1}).ok ? 0 : 1)"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+volumes:
+  benchmark-data:
