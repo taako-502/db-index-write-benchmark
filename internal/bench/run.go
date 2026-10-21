@@ -216,7 +216,7 @@ func runCase(ctx context.Context, db *mongo.Database, c Config, k Case, docs []a
 	wall := time.Since(wallStart)
 	// Verify collection size (and counter outcome), outside the timed region.
 	// Each update batch also checks ModifiedCount against its expected size.
-	var filter bson.D
+	filter := bson.D{}
 	if k.Operation != "insert" {
 		for _, f := range UpdateFields(k.Operation) {
 			if f.Key == "counter" {
