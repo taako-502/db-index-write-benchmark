@@ -11,7 +11,8 @@ def request(path, body=None):
     with urllib.request.urlopen(req, timeout=10) as response:
         return response.read()
 
-binary = tempfile.mktemp(prefix='bench-http-')
+temporary = tempfile.TemporaryDirectory(prefix='bench-http-')
+binary = temporary.name + '/bench'
 subprocess.run(['go', 'build', '-o', binary, './cmd/bench'], check=True)
 proc = subprocess.Popen([binary, '-serve', '-listen', '127.0.0.1:8087', '-out', 'results/http'])
 try:
@@ -59,3 +60,5 @@ finally:
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
+
+    temporary.cleanup()

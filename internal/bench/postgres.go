@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -55,20 +56,33 @@ func RunPostgres(ctx context.Context, uri string, c Config, checkpoint func(Repo
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if _, e := conn.Exec(cleanup, "DROP SCHEMA "+quoted+" CASCADE"); e != nil {
+		// Cancellation can close the measurement connection. Cleanup owns a fresh connection.
+		cleanupConn, e := pgx.ConnectConfig(cleanup, cfg)
+		if e == nil {
+			_, e = cleanupConn.Exec(cleanup, "DROP SCHEMA "+quoted+" CASCADE")
+			_ = cleanupConn.Close(cleanup)
+		}
+		if e != nil {
 			log.Printf("cleanup failed for schema %s", schema)
 			if err == nil {
 				err = fmt.Errorf("schema cleanup: %w", e)
 			}
 		}
 	}()
-	env := map[string]string{"engine": "postgresql", "go": runtime.Version(), "os": runtime.GOOS, "arch": runtime.GOARCH, "schema": schema, "concurrency": "1", "client_cpus": strconv.Itoa(runtime.NumCPU()), "gomaxprocs": strconv.Itoa(runtime.GOMAXPROCS(0)), "batch_api": "pgx SendBatch: one statement per row, implicit transaction per batch; Close includes commit acknowledgement", "timing": "sum of SendBatch through Close; batch preparation excluded", "cache_policy": "fresh table; updates after preload; no cache flush", "planner": "enable_seqscan=off (preference, not a forced plan)", "autovacuum": "enabled; background maintenance may affect timings"}
-	for _, name := range []string{"server_version", "synchronous_commit", "fsync", "full_page_writes", "shared_buffers", "wal_level"} {
+	env := map[string]string{"engine": "postgresql", "go": runtime.Version(), "os": runtime.GOOS, "arch": runtime.GOARCH, "schema": schema, "concurrency": "1", "client_cpus": strconv.Itoa(runtime.NumCPU()), "gomaxprocs": strconv.Itoa(runtime.GOMAXPROCS(0)), "batch_api": "pgx SendBatch: one statement per row, implicit transaction per batch; Close includes commit acknowledgement", "timing": "sum of SendBatch through Close; batch preparation excluded", "cache_policy": "fresh table; updates after preload; no cache flush", "planner": "enable_seqscan=off (preference, not a forced plan)", "maintenance": "autovacuum settings unchanged; background maintenance may affect timings"}
+	for _, name := range []string{"server_version", "synchronous_commit", "fsync", "full_page_writes", "shared_buffers", "wal_level", "autovacuum"} {
 		var value string
 		if err = withTimeout(ctx, c.Timeout, func(ctx context.Context) error { return conn.QueryRow(ctx, "SHOW "+name).Scan(&value) }); err != nil {
 			return
 		}
 		env[name] = value
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, dep := range info.Deps {
+			if dep.Path == "github.com/jackc/pgx/v5" {
+				env["pgx"] = dep.Version
+			}
+		}
 	}
 	fill := c.Fillfactor
 	if fill == 0 {

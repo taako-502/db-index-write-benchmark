@@ -48,7 +48,7 @@ func run() error {
 	flag.IntVar(&c.Repeats, "repeats", 5, "measured trials per condition")
 	flag.IntVar(&c.Batch, "batch", 1000, "documents per acknowledged batch (1 = single-document batch)")
 	flag.Int64Var(&c.Seed, "seed", 42, "reproducible data/order seed")
-	flag.BoolVar(&c.Journal, "journal", false, "wait for journal acknowledgement (w=1 always)")
+	flag.BoolVar(&c.Journal, "journal", false, "wait for durable acknowledgement (MongoDB j:true / PostgreSQL synchronous_commit:on)")
 	flag.DurationVar(&c.Timeout, "timeout", 2*time.Minute, "timeout per operation/setup call")
 	flag.DurationVar(&c.Cooldown, "cooldown", time.Second, "pause after setup per trial")
 	flag.StringVar(&c.Notes, "notes", "", "machine, Docker resources, disk and other environment notes")
