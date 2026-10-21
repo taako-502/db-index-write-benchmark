@@ -15,6 +15,16 @@ jobs:
         options: >-
           --health-cmd "mongosh --quiet --eval 'quit(db.adminCommand({ping:1}).ok ? 0 : 1)'"
           --health-interval 5s --health-timeout 5s --health-retries 20
+      postgresql:
+        image: postgres:17.6
+        env:
+          POSTGRES_USER: benchmark
+          POSTGRES_PASSWORD: benchmark
+          POSTGRES_DB: benchmark
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U benchmark -d benchmark"
+          --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -25,10 +35,17 @@ jobs:
       - run: go test -race ./...
         env:
           BENCH_TEST_URI: mongodb://127.0.0.1:27017
+          BENCH_TEST_POSTGRES_URI: postgres://benchmark:benchmark@127.0.0.1:5432/benchmark?sslmode=disable
       - name: CLI smoke test
-        run: go run ./cmd/bench -sizes 101 -repeats 1 -batch 30 -cooldown 0s -out results/smoke
+        run: go run ./cmd/bench -engines mongodb,postgresql -sizes 101 -repeats 1 -batch 30 -cooldown 0s -out results/smoke
         env:
           MONGODB_URI: mongodb://127.0.0.1:27017
+          POSTGRES_URI: postgres://benchmark:benchmark@127.0.0.1:5432/benchmark?sslmode=disable
+      - name: HTTP configuration, execution and cancellation smoke test
+        run: python3 .github/scripts/http_smoke.py
+        env:
+          MONGODB_URI: mongodb://127.0.0.1:27017
+          POSTGRES_URI: postgres://benchmark:benchmark@127.0.0.1:5432/benchmark?sslmode=disable
       - name: Regenerate report offline
         run: go run ./cmd/bench -report results/smoke/results.json -out results/regenerated
       - uses: actions/upload-artifact@v4

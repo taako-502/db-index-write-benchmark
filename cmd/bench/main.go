@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/taako-502/mongodb-index-write-benchmark/internal/bench"
+	"github.com/taako-502/mongodb-index-write-benchmark/internal/web"
 )
 
 func integers(s string) ([]int, error) {
@@ -38,12 +39,16 @@ func main() {
 
 func run() error {
 	var c bench.Config
+	engines := flag.String("engines", "mongodb", "comma-separated engines: mongodb,postgresql (runs sequentially in this order)")
+	serve := flag.Bool("serve", false, "start local configuration and execution UI")
+	listen := flag.String("listen", "127.0.0.1:8080", "loopback address for UI")
+	flag.IntVar(&c.Fillfactor, "pg-fillfactor", 100, "PostgreSQL table fillfactor (10..100)")
 	sizes := flag.String("sizes", "100000,1000000", "comma-separated document counts")
 	indexes := flag.String("indexes", "0,1,5", "additional index counts (0..5, must include 0)")
 	flag.IntVar(&c.Repeats, "repeats", 5, "measured trials per condition")
 	flag.IntVar(&c.Batch, "batch", 1000, "documents per acknowledged batch (1 = single-document batch)")
 	flag.Int64Var(&c.Seed, "seed", 42, "reproducible data/order seed")
-	flag.BoolVar(&c.Journal, "journal", false, "wait for journal acknowledgement (w=1 always)")
+	flag.BoolVar(&c.Journal, "journal", false, "wait for durable acknowledgement (MongoDB j:true / PostgreSQL synchronous_commit:on)")
 	flag.DurationVar(&c.Timeout, "timeout", 2*time.Minute, "timeout per operation/setup call")
 	flag.DurationVar(&c.Cooldown, "cooldown", time.Second, "pause after setup per trial")
 	flag.StringVar(&c.Notes, "notes", "", "machine, Docker resources, disk and other environment notes")
@@ -54,6 +59,30 @@ func run() error {
 		return fmt.Errorf("unexpected positional arguments")
 	}
 	var err error
+	c.Engines = strings.Split(*engines, ",")
+	for i := range c.Engines {
+		c.Engines[i] = strings.TrimSpace(c.Engines[i])
+	}
+	mongoURI := os.Getenv("MONGODB_URI")
+	if mongoURI == "" {
+		mongoURI = "mongodb://127.0.0.1:27018"
+	}
+	pgURI := os.Getenv("POSTGRES_URI")
+	if pgURI == "" {
+		pgURI = "postgres://benchmark:benchmark@127.0.0.1:5433/benchmark?sslmode=disable"
+	}
+	if *serve {
+		if *input != "" {
+			return fmt.Errorf("-serve cannot be combined with -report")
+		}
+		root := *out
+		if root == "" {
+			root = "results"
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return web.Serve(ctx, *listen, root, mongoURI, pgURI)
+	}
 	if c.Sizes, err = integers(*sizes); err != nil {
 		return fmt.Errorf("sizes: %w", err)
 	}
@@ -81,6 +110,7 @@ func run() error {
 		if e = json.Unmarshal(data, &r); e != nil {
 			return e
 		}
+		bench.UpgradeReport(&r)
 		if e = bench.ValidateReport(r); e != nil {
 			return e
 		}
@@ -88,13 +118,9 @@ func run() error {
 			return e
 		}
 	} else {
-		uri := os.Getenv("MONGODB_URI")
-		if uri == "" {
-			uri = "mongodb://127.0.0.1:27018"
-		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		if _, err = bench.Run(ctx, uri, c, func(r bench.Report) error { return bench.Save(*out, r) }); err != nil {
+		if _, err = bench.RunSuite(ctx, mongoURI, pgURI, c, func(r bench.Report) error { return bench.Save(*out, r) }); err != nil {
 			return err
 		}
 	}
