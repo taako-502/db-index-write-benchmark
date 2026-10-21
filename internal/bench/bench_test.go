@@ -72,7 +72,7 @@ func TestDocumentsAndUpdates(t *testing.T) {
 
 func sampleReport() Report {
 	c := smallConfig()
-	r := Report{SchemaVersion: 2, Config: c, Completed: true, Environment: map[string]string{"mongodb": "test fixture"}}
+	r := Report{SchemaVersion: 3, Config: c, Completed: true, Environment: map[string]string{"mongodb": "test fixture"}}
 	for _, k := range Plan(c) {
 		seconds := float64(k.Indexes+1) * float64(k.Trial)
 		r.Results = append(r.Results, Result{Case: k, Seconds: seconds, WallSeconds: seconds, OpsPerSecond: float64(k.Size) / seconds})
@@ -212,6 +212,7 @@ func TestLegacyReportUpgrade(t *testing.T) {
 	r.Config.Engines = nil
 	for i := range r.Results {
 		r.Results[i].Engine = ""
+		r.Results[i].PreloadSize = 0
 	}
 	if e := ValidateReport(r); e != nil {
 		t.Fatal(e)
@@ -225,7 +226,7 @@ func TestLegacyReportUpgrade(t *testing.T) {
 	if e := json.Unmarshal(b, &got); e != nil {
 		t.Fatal(e)
 	}
-	if got.SchemaVersion != 2 || got.Results[0].Engine != "mongodb" {
+	if got.SchemaVersion != 3 || got.Results[0].Engine != "mongodb" {
 		t.Fatal("legacy report not upgraded")
 	}
 	if r.Results[0].Engine != "" {

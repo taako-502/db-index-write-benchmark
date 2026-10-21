@@ -1,6 +1,7 @@
 package bench
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"slices"
@@ -13,17 +14,18 @@ import (
 var Operations = []string{"insert", "update_unindexed", "update_one", "update_five"}
 
 type Config struct {
-	Engines    []string      `json:"engines,omitempty"`
-	Fillfactor int           `json:"pg_fillfactor,omitempty"`
-	Sizes      []int         `json:"sizes"`
-	Indexes    []int         `json:"indexes"`
-	Repeats    int           `json:"repeats"`
-	Batch      int           `json:"batch_size"`
-	Seed       int64         `json:"seed"`
-	Journal    bool          `json:"journal"`
-	Timeout    time.Duration `json:"operation_timeout_ns"`
-	Cooldown   time.Duration `json:"cooldown_ns"`
-	Notes      string        `json:"notes"`
+	Engines      []string      `json:"engines,omitempty"`
+	Fillfactor   int           `json:"pg_fillfactor,omitempty"`
+	PreloadSizes []int         `json:"preload_sizes,omitempty"`
+	Sizes        []int         `json:"sizes"`
+	Indexes      []int         `json:"indexes"`
+	Repeats      int           `json:"repeats"`
+	Batch        int           `json:"batch_size"`
+	Seed         int64         `json:"seed"`
+	Journal      bool          `json:"journal"`
+	Timeout      time.Duration `json:"operation_timeout_ns"`
+	Cooldown     time.Duration `json:"cooldown_ns"`
+	Notes        string        `json:"notes"`
 }
 
 func (c Config) EngineNames() []string {
@@ -50,7 +52,7 @@ func (c Config) Validate() error {
 	if !slices.Contains(c.Indexes, 0) {
 		return fmt.Errorf("indexes must include 0 for the baseline")
 	}
-	for _, values := range [][]int{c.Sizes, c.Indexes} {
+	for _, values := range [][]int{c.Sizes, c.Indexes, c.PreloadSizes} {
 		seen := map[int]bool{}
 		for _, v := range values {
 			if seen[v] {
@@ -64,6 +66,13 @@ func (c Config) Validate() error {
 			return fmt.Errorf("sizes must be positive")
 		}
 	}
+	for _, p := range c.PreloadSizes {
+		for _, n := range c.Sizes {
+			if p < n || p > int(^uint(0)>>1)-n {
+				return fmt.Errorf("preload sizes must be >= every measured size and preload + size must fit int")
+			}
+		}
+	}
 	for _, n := range c.Indexes {
 		if n < 0 || n > 5 {
 			return fmt.Errorf("indexes must be in 0..5")
@@ -73,11 +82,12 @@ func (c Config) Validate() error {
 }
 
 type Case struct {
-	Engine    string `json:"engine,omitempty"`
-	Size      int    `json:"size"`
-	Indexes   int    `json:"indexes"`
-	Operation string `json:"operation"`
-	Trial     int    `json:"trial"`
+	PreloadSize int    `json:"preload_size"`
+	Engine      string `json:"engine,omitempty"`
+	Size        int    `json:"size"`
+	Indexes     int    `json:"indexes"`
+	Operation   string `json:"operation"`
+	Trial       int    `json:"trial"`
 }
 
 type Result struct {
@@ -107,7 +117,16 @@ func Plan(c Config) []Case {
 			for _, idx := range c.Indexes {
 				for _, op := range Operations {
 					for _, engine := range c.EngineNames() {
-						round = append(round, Case{Engine: engine, Size: n, Indexes: idx, Operation: op, Trial: trial})
+						preloads := c.PreloadSizes
+						if len(preloads) == 0 {
+							preloads = []int{0}
+							if op != "insert" {
+								preloads = []int{n}
+							}
+						}
+						for _, p := range preloads {
+							round = append(round, Case{Engine: engine, Size: n, PreloadSize: p, Indexes: idx, Operation: op, Trial: trial})
+						}
 					}
 				}
 			}
@@ -121,9 +140,13 @@ func Plan(c Config) []Case {
 // Raw BSON avoids counting data generation/initial BSON encoding in insert timing.
 func Documents(n int, seed int64) ([]any, error) {
 	rng := rand.New(rand.NewSource(seed))
+	return documentBatch(0, n, rng)
+}
+
+func documentBatch(start, n int, rng *rand.Rand) ([]any, error) {
 	docs := make([]any, n)
 	for i := range docs {
-		d := bson.D{{Key: "_id", Value: int64(i)}, {Key: "counter", Value: int64(0)}}
+		d := bson.D{{Key: "_id", Value: int64(start + i)}, {Key: "counter", Value: int64(0)}}
 		for f := 1; f <= 5; f++ {
 			d = append(d, bson.E{Key: fmt.Sprintf("field%d", f), Value: rng.Int63n(1_000_000_000)})
 		}
@@ -163,6 +186,7 @@ func UpdateModels(ids []int, op string) []mongo.WriteModel {
 }
 
 type Summary struct {
+	PreloadSize   int     `json:"preload_size"`
 	Engine        string  `json:"engine"`
 	Size          int     `json:"size"`
 	Indexes       int     `json:"indexes"`
@@ -188,12 +212,12 @@ func median(v []float64) float64 {
 
 func Summaries(results []Result) []Summary {
 	type key struct {
-		n, idx     int
-		op, engine string
+		n, idx, preload int
+		op, engine      string
 	}
 	groups := map[key][]Result{}
 	for _, r := range results {
-		k := key{r.Size, r.Indexes, r.Operation, r.Engine}
+		k := key{r.Size, r.Indexes, r.PreloadSize, r.Operation, r.Engine}
 		groups[k] = append(groups[k], r)
 	}
 	var out []Summary
@@ -204,11 +228,11 @@ func Summaries(results []Result) []Summary {
 			ops[i] = r.OpsPerSecond
 		}
 		mt, mo := median(times), median(ops)
-		out = append(out, Summary{Engine: k.engine, Size: k.n, Indexes: k.idx, Operation: k.op, Samples: len(rs), MedianSeconds: mt, MinSeconds: times[0], MaxSeconds: times[len(times)-1], MedianOps: mo, MinOps: ops[0], MaxOps: ops[len(ops)-1]})
+		out = append(out, Summary{PreloadSize: k.preload, Engine: k.engine, Size: k.n, Indexes: k.idx, Operation: k.op, Samples: len(rs), MedianSeconds: mt, MinSeconds: times[0], MaxSeconds: times[len(times)-1], MedianOps: mo, MinOps: ops[0], MaxOps: ops[len(ops)-1]})
 	}
 	for i := range out {
 		for _, b := range out {
-			if b.Engine == out[i].Engine && b.Size == out[i].Size && b.Operation == out[i].Operation && b.Indexes == 0 {
+			if b.PreloadSize == out[i].PreloadSize && b.Engine == out[i].Engine && b.Size == out[i].Size && b.Operation == out[i].Operation && b.Indexes == 0 {
 				out[i].Ratio = out[i].MedianSeconds / b.MedianSeconds
 			}
 		}
@@ -219,6 +243,9 @@ func Summaries(results []Result) []Summary {
 		}
 		if a.Engine > b.Engine {
 			return 1
+		}
+		if a.PreloadSize != b.PreloadSize {
+			return a.PreloadSize - b.PreloadSize
 		}
 		if a.Size != b.Size {
 			return a.Size - b.Size
@@ -232,4 +259,44 @@ func Summaries(results []Result) []Summary {
 		return a.Indexes - b.Indexes
 	})
 	return out
+}
+
+// sampleIDs samples across the entire existing collection with bounded memory.
+func sampleIDs(population, count int, seed int64) []int {
+	rng := rand.New(rand.NewSource(seed))
+	swaps := make(map[int]int, count)
+	ids := make([]int, count)
+	get := func(i int) int {
+		if v, ok := swaps[i]; ok {
+			return v
+		}
+		return i
+	}
+	for i := range ids {
+		remaining := population - i
+		j := rng.Intn(remaining)
+		ids[i] = get(j)
+		swaps[j] = get(remaining - 1)
+		delete(swaps, remaining-1)
+	}
+	return ids
+}
+
+// streamDocuments generates only one batch at a time; generation is outside DB timing.
+func streamDocuments(ctx context.Context, count, batch int, rng *rand.Rand, fn func([]any) error) error {
+	for start := 0; start < count; {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n := min(batch, count-start)
+		docs, err := documentBatch(start, n, rng)
+		if err != nil {
+			return err
+		}
+		if err = fn(docs); err != nil {
+			return err
+		}
+		start += n
+	}
+	return nil
 }

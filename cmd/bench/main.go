@@ -43,7 +43,8 @@ func run() error {
 	serve := flag.Bool("serve", false, "start local configuration and execution UI")
 	listen := flag.String("listen", "127.0.0.1:8080", "loopback address for UI")
 	flag.IntVar(&c.Fillfactor, "pg-fillfactor", 100, "PostgreSQL table fillfactor (10..100)")
-	sizes := flag.String("sizes", "100000,1000000", "comma-separated document counts")
+	sizes := flag.String("sizes", "100000,1000000", "comma-separated measured operation counts")
+	preloads := flag.String("preload-sizes", "", "existing row counts before measurement (each >= sizes); empty keeps legacy empty-insert/full-update mode")
 	indexes := flag.String("indexes", "0,1,5", "additional index counts (0..5, must include 0)")
 	flag.IntVar(&c.Repeats, "repeats", 5, "measured trials per condition")
 	flag.IntVar(&c.Batch, "batch", 1000, "documents per acknowledged batch (1 = single-document batch)")
@@ -85,6 +86,11 @@ func run() error {
 	}
 	if c.Sizes, err = integers(*sizes); err != nil {
 		return fmt.Errorf("sizes: %w", err)
+	}
+	if *preloads != "" {
+		if c.PreloadSizes, err = integers(*preloads); err != nil {
+			return fmt.Errorf("preload-sizes: %w", err)
+		}
 	}
 	if c.Indexes, err = integers(*indexes); err != nil {
 		return fmt.Errorf("indexes: %w", err)
