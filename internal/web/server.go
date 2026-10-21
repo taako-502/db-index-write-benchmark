@@ -173,8 +173,14 @@ func (s *server) start(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if c.Repeats > 100 || len(c.Sizes) > 10 {
-		http.Error(w, "UI supports up to 100 repeats and 10 sizes", 400)
+	for _, n := range c.PreloadSizes {
+		if n > 100000000 {
+			http.Error(w, "UI supports at most 100,000,000 preloaded rows", 400)
+			return
+		}
+	}
+	if c.Repeats > 100 || len(c.Sizes) > 10 || len(c.PreloadSizes) > 10 {
+		http.Error(w, "UI supports up to 100 repeats and 10 sizes per axis", 400)
 		return
 	}
 	s.mu.Lock()

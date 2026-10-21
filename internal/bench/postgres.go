@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	mathrand "math/rand"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -69,7 +70,7 @@ func RunPostgres(ctx context.Context, uri string, c Config, checkpoint func(Repo
 			}
 		}
 	}()
-	env := map[string]string{"engine": "postgresql", "go": runtime.Version(), "os": runtime.GOOS, "arch": runtime.GOARCH, "schema": schema, "concurrency": "1", "client_cpus": strconv.Itoa(runtime.NumCPU()), "gomaxprocs": strconv.Itoa(runtime.GOMAXPROCS(0)), "batch_api": "pgx SendBatch: one statement per row, implicit transaction per batch; Close includes commit acknowledgement", "timing": "sum of SendBatch through Close; batch preparation excluded", "cache_policy": "fresh table; updates after preload; no cache flush", "planner": "enable_seqscan=off (preference, not a forced plan)", "maintenance": "autovacuum settings unchanged; background maintenance may affect timings"}
+	env := map[string]string{"engine": "postgresql", "go": runtime.Version(), "os": runtime.GOOS, "arch": runtime.GOARCH, "schema": schema, "concurrency": "1", "client_cpus": strconv.Itoa(runtime.NumCPU()), "gomaxprocs": strconv.Itoa(runtime.GOMAXPROCS(0)), "batch_api": "pgx SendBatch: one statement per row, implicit transaction per batch; Close includes commit acknowledgement", "timing": "sum of SendBatch through Close; batch preparation excluded", "cache_policy": "fresh table; measured operations after preload; no cache flush", "planner": "enable_seqscan=off (preference, not a forced plan)", "maintenance": "autovacuum settings unchanged; background maintenance may affect timings"}
 	for _, name := range []string{"server_version", "synchronous_commit", "fsync", "full_page_writes", "shared_buffers", "wal_level", "autovacuum"} {
 		var value string
 		if err = withTimeout(ctx, c.Timeout, func(ctx context.Context) error { return conn.QueryRow(ctx, "SHOW "+name).Scan(&value) }); err != nil {
@@ -89,12 +90,12 @@ func RunPostgres(ctx context.Context, uri string, c Config, checkpoint func(Repo
 		fill = 100
 	}
 	env["fillfactor"] = strconv.Itoa(fill)
-	return runPlan(ctx, c, env, func(ctx context.Context, c Config, k Case, docs []any, ids []int) (Result, error) {
-		return pgCase(ctx, conn, quoted, c, k, docs, ids, fill)
+	return runPlan(ctx, c, env, func(ctx context.Context, c Config, k Case, ids []int) (Result, error) {
+		return pgCase(ctx, conn, quoted, c, k, ids, fill)
 	}, checkpoint)
 }
 
-func pgCase(ctx context.Context, conn *pgx.Conn, schema string, c Config, k Case, docs []any, ids []int, fill int) (Result, error) {
+func pgCase(ctx context.Context, conn *pgx.Conn, schema string, c Config, k Case, ids []int, fill int) (Result, error) {
 	table := schema + ".documents"
 	exec := func(sql string) error {
 		return withTimeout(ctx, c.Timeout, func(ctx context.Context) error { _, e := conn.Exec(ctx, sql); return e })
@@ -110,23 +111,15 @@ func pgCase(ctx context.Context, conn *pgx.Conn, schema string, c Config, k Case
 			return Result{}, e
 		}
 	}
-	// Decode exactly the MongoDB fixture outside all measured calls.
-	rows := make([][]any, len(docs))
-	for i, d := range docs {
-		raw := d.(bson.Raw)
-		rows[i] = []any{raw.Lookup("_id").Int64(), raw.Lookup("counter").Int64(), raw.Lookup("field1").Int64(), raw.Lookup("field2").Int64(), raw.Lookup("field3").Int64(), raw.Lookup("field4").Int64(), raw.Lookup("field5").Int64()}
-	}
+	rng := mathrand.New(mathrand.NewSource(c.Seed))
 	insert := "INSERT INTO " + table + " (id,counter,field1,field2,field3,field4,field5) VALUES ($1,$2,$3,$4,$5,$6,$7)"
-	if k.Operation != "insert" {
-		for start := 0; start < k.Size; start += c.Batch {
-			batch := &pgx.Batch{}
-			for _, row := range rows[start:min(start+c.Batch, k.Size)] {
-				batch.Queue(insert, row...)
-			}
-			if _, e := sendPG(ctx, conn, c.Timeout, batch); e != nil {
-				return Result{}, e
-			}
-		}
+	if e := streamDocuments(ctx, k.PreloadSize, c.Batch, rng, func(docs []any) error {
+		_, err := sendPG(ctx, conn, c.Timeout, pgInsertBatch(insert, docs))
+		return err
+	}); e != nil {
+		return Result{}, e
+	}
+	if k.PreloadSize > 0 {
 		if e := exec("ANALYZE " + table); e != nil {
 			return Result{}, e
 		}
@@ -152,13 +145,17 @@ func pgCase(ctx context.Context, conn *pgx.Conn, schema string, c Config, k Case
 	wallStart := time.Now()
 	var elapsed time.Duration
 	for start := 0; start < k.Size; start += c.Batch {
-		end := min(start+c.Batch, k.Size)
+		end := start + min(c.Batch, k.Size-start)
 		batch := &pgx.Batch{}
-		for i := start; i < end; i++ {
-			if k.Operation == "insert" {
-				batch.Queue(insert, rows[i]...)
-			} else {
-				batch.Queue(update, int64(ids[i]))
+		if k.Operation == "insert" {
+			docs, e := documentBatch(k.PreloadSize+start, end-start, rng)
+			if e != nil {
+				return Result{}, e
+			}
+			batch = pgInsertBatch(insert, docs)
+		} else {
+			for _, id := range ids[start:end] {
+				batch.Queue(update, int64(id))
 			}
 		}
 		d, e := sendPG(ctx, conn, c.Timeout, batch)
@@ -178,8 +175,15 @@ func pgCase(ctx context.Context, conn *pgx.Conn, schema string, c Config, k Case
 	}); e != nil {
 		return Result{}, e
 	}
-	if count != int64(k.Size) {
-		return Result{}, fmt.Errorf("row count: want %d got %d", k.Size, count)
+	expected := k.PreloadSize
+	if k.Operation == "insert" {
+		expected += k.Size
+	}
+	if k.Operation == "update_unindexed" {
+		expected = k.Size
+	}
+	if count != int64(expected) {
+		return Result{}, fmt.Errorf("row count: want %d got %d", expected, count)
 	}
 	if e := withTimeout(ctx, c.Timeout, func(ctx context.Context) error {
 		return conn.QueryRow(ctx, "SELECT pg_indexes_size($1::regclass)", table).Scan(&indexBytes)
@@ -208,4 +212,13 @@ func sendPG(ctx context.Context, conn *pgx.Conn, timeout time.Duration, batch *p
 	}
 	e := results.Close()
 	return time.Since(start), e
+}
+
+func pgInsertBatch(sql string, docs []any) *pgx.Batch {
+	batch := &pgx.Batch{}
+	for _, d := range docs {
+		raw := d.(bson.Raw)
+		batch.Queue(sql, raw.Lookup("_id").Int64(), raw.Lookup("counter").Int64(), raw.Lookup("field1").Int64(), raw.Lookup("field2").Int64(), raw.Lookup("field3").Int64(), raw.Lookup("field4").Int64(), raw.Lookup("field5").Int64())
+	}
+	return batch
 }

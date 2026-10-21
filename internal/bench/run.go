@@ -72,7 +72,7 @@ func Run(ctx context.Context, uri string, c Config, checkpoint func(Report) erro
 			}
 		}
 	}()
-	env := map[string]string{"go": runtime.Version(), "os": runtime.GOOS, "arch": runtime.GOARCH, "client_cpus": strconv.Itoa(runtime.NumCPU()), "gomaxprocs": strconv.Itoa(runtime.GOMAXPROCS(0)), "mongodb": build.Version, "write_concern": fmt.Sprintf("w:1,j:%t", c.Journal), "concurrency": "1", "retry_writes": "false", "ordered": "true", "database": db.Name(), "timing": "sum of acknowledged driver calls; batch preparation excluded", "cache_policy": "fresh collection; updates immediately after preload; no OS/WiredTiger cache flush"}
+	env := map[string]string{"go": runtime.Version(), "os": runtime.GOOS, "arch": runtime.GOARCH, "client_cpus": strconv.Itoa(runtime.NumCPU()), "gomaxprocs": strconv.Itoa(runtime.GOMAXPROCS(0)), "mongodb": build.Version, "write_concern": fmt.Sprintf("w:1,j:%t", c.Journal), "concurrency": "1", "retry_writes": "false", "ordered": "true", "database": db.Name(), "timing": "sum of acknowledged driver calls; batch preparation excluded", "cache_policy": "fresh collection; measured operations after preload; no OS/WiredTiger cache flush"}
 	if info, ok := debug.ReadBuildInfo(); ok {
 		for _, dep := range info.Deps {
 			if dep.Path == "go.mongodb.org/mongo-driver/v2" {
@@ -80,54 +80,46 @@ func Run(ctx context.Context, uri string, c Config, checkpoint func(Report) erro
 			}
 		}
 	}
-	return runPlan(ctx, c, env, func(ctx context.Context, c Config, k Case, docs []any, ids []int) (Result, error) {
-		return runCase(ctx, db, c, k, docs, ids)
+	return runPlan(ctx, c, env, func(ctx context.Context, c Config, k Case, ids []int) (Result, error) {
+		return runCase(ctx, db, c, k, ids)
 	}, checkpoint)
 }
 
-type caseExecutor func(context.Context, Config, Case, []any, []int) (Result, error)
+type caseExecutor func(context.Context, Config, Case, []int) (Result, error)
 
 func runPlan(ctx context.Context, c Config, env map[string]string, execute caseExecutor, checkpoint func(Report) error) (report Report, err error) {
-	report = Report{SchemaVersion: 2, StartedAt: time.Now().UTC(), Config: c, Environment: env, Results: []Result{}}
+	report = Report{SchemaVersion: 3, StartedAt: time.Now().UTC(), Config: c, Environment: env, Results: []Result{}}
 	if err = checkpoint(report); err != nil {
 		return report, err
 	}
 	// Exercise each operation/index combination, outside measured trials.
 	warmSize := min(1000, slicesMin(c.Sizes))
-	warmDocs, e := Documents(warmSize, c.Seed)
-	if e != nil {
-		return report, e
-	}
-	warmIDs := mathrand.New(mathrand.NewSource(c.Seed)).Perm(warmSize)
+	warmIDs := sampleIDs(warmSize, warmSize, c.Seed)
 	log.Printf("warm-up: %d documents per condition", warmSize)
 	for _, idx := range c.Indexes {
 		for _, op := range Operations {
-			if _, err = execute(ctx, c, Case{Engine: c.EngineNames()[0], Size: warmSize, Indexes: idx, Operation: op, Trial: 0}, warmDocs, warmIDs); err != nil {
+			preload := 0
+			if op != "insert" || len(c.PreloadSizes) > 0 {
+				preload = warmSize
+			}
+			if _, err = execute(ctx, c, Case{PreloadSize: preload, Engine: c.EngineNames()[0], Size: warmSize, Indexes: idx, Operation: op, Trial: 0}, warmIDs); err != nil {
 				return report, fmt.Errorf("warm-up: %w", err)
 			}
 		}
 	}
-	var docs []any
 	var ids []int
-	lastSize := 0
 	plan := Plan(c)
 	for i, k := range plan {
 		if err = ctx.Err(); err != nil {
 			return report, err
 		}
-		if k.Size != lastSize {
-			docs = nil
-			ids = nil
-			docs, err = Documents(k.Size, c.Seed)
-			if err != nil {
-				return report, err
-			}
-			ids = mathrand.New(mathrand.NewSource(c.Seed)).Perm(k.Size)
-			lastSize = k.Size
+		ids = nil
+		if k.Operation != "insert" {
+			ids = sampleIDs(k.PreloadSize, k.Size, c.Seed)
 		}
-		log.Printf("[%d/%d] n=%d indexes=%d op=%s trial=%d", i+1, len(plan), k.Size, k.Indexes, k.Operation, k.Trial)
+		log.Printf("[%d/%d] preload=%d measured=%d indexes=%d op=%s trial=%d", i+1, len(plan), k.PreloadSize, k.Size, k.Indexes, k.Operation, k.Trial)
 		var result Result
-		result, err = execute(ctx, c, k, docs, ids)
+		result, err = execute(ctx, c, k, ids)
 		if err != nil {
 			return report, fmt.Errorf("%+v: %w", k, err)
 		}
@@ -149,7 +141,7 @@ func slicesMin(v []int) int {
 	return m
 }
 
-func runCase(ctx context.Context, db *mongo.Database, c Config, k Case, docs []any, ids []int) (Result, error) {
+func runCase(ctx context.Context, db *mongo.Database, c Config, k Case, ids []int) (Result, error) {
 	col := db.Collection("documents")
 	if err := withTimeout(ctx, c.Timeout, func(ctx context.Context) error { return col.Drop(ctx) }); err != nil {
 		return Result{}, err
@@ -166,16 +158,17 @@ func runCase(ctx context.Context, db *mongo.Database, c Config, k Case, docs []a
 			return Result{}, err
 		}
 	}
-	if k.Operation != "insert" {
-		for start := 0; start < k.Size; start += c.Batch {
-			batch := docs[start:min(start+c.Batch, k.Size)]
-			if err := withTimeout(ctx, c.Timeout, func(ctx context.Context) error {
-				_, err := col.InsertMany(ctx, batch, options.InsertMany().SetOrdered(true))
-				return err
-			}); err != nil {
-				return Result{}, err
+	rng := mathrand.New(mathrand.NewSource(c.Seed))
+	if err := streamDocuments(ctx, k.PreloadSize, c.Batch, rng, func(batch []any) error {
+		return withTimeout(ctx, c.Timeout, func(ctx context.Context) error {
+			res, err := col.InsertMany(ctx, batch, options.InsertMany().SetOrdered(true))
+			if err == nil && len(res.InsertedIDs) != len(batch) {
+				return fmt.Errorf("incomplete preload")
 			}
-		}
+			return err
+		})
+	}); err != nil {
+		return Result{}, err
 	}
 	// The same pause occurs after setup in all conditions; it is not a cache reset.
 	if c.Cooldown > 0 {
@@ -191,7 +184,15 @@ func runCase(ctx context.Context, db *mongo.Database, c Config, k Case, docs []a
 	var elapsed time.Duration
 	wallStart := time.Now()
 	for start := 0; start < k.Size; start += c.Batch {
-		end := min(start+c.Batch, k.Size)
+		end := start + min(c.Batch, k.Size-start)
+		var docs []any
+		if k.Operation == "insert" {
+			var err error
+			docs, err = documentBatch(k.PreloadSize+start, end-start, rng)
+			if err != nil {
+				return Result{}, err
+			}
+		}
 		var models []mongo.WriteModel
 		if k.Operation != "insert" {
 			models = UpdateModels(ids[start:end], k.Operation)
@@ -201,7 +202,7 @@ func runCase(ctx context.Context, db *mongo.Database, c Config, k Case, docs []a
 		var callErr error
 		var changed int64
 		if k.Operation == "insert" {
-			res, e := col.InsertMany(batchCtx, docs[start:end], options.InsertMany().SetOrdered(true))
+			res, e := col.InsertMany(batchCtx, docs, options.InsertMany().SetOrdered(true))
 			callErr = e
 			if e == nil {
 				changed = int64(len(res.InsertedIDs))
@@ -237,8 +238,15 @@ func runCase(ctx context.Context, db *mongo.Database, c Config, k Case, docs []a
 	if err := withTimeout(ctx, c.Timeout, func(ctx context.Context) error { var e error; count, e = col.CountDocuments(ctx, filter); return e }); err != nil {
 		return Result{}, err
 	}
-	if count != int64(k.Size) {
-		return Result{}, fmt.Errorf("count mismatch: want %d, got %d", k.Size, count)
+	expected := k.PreloadSize
+	if k.Operation == "insert" {
+		expected += k.Size
+	}
+	if k.Operation == "update_unindexed" {
+		expected = k.Size
+	}
+	if count != int64(expected) {
+		return Result{}, fmt.Errorf("count mismatch: want %d, got %d", expected, count)
 	}
 	var stats struct {
 		TotalIndexSize int64 `bson:"totalIndexSize"`

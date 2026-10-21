@@ -16,7 +16,7 @@ func TestControlLifecycleAndOrigin(t *testing.T) {
 	started := make(chan struct{})
 	s := &server{root: t.TempDir(), ctx: context.Background()}
 	s.run = func(ctx context.Context, _, _ string, c bench.Config, save func(bench.Report) error) (bench.Report, error) {
-		r := bench.Report{SchemaVersion: 2, Config: c, Environment: map[string]string{}}
+		r := bench.Report{SchemaVersion: 3, Config: c, Environment: map[string]string{}}
 		if e := save(r); e != nil {
 			return r, e
 		}
@@ -34,7 +34,7 @@ func TestControlLifecycleAndOrigin(t *testing.T) {
 		handler.ServeHTTP(w, r)
 		return w
 	}
-	c := bench.Config{Engines: []string{"postgresql"}, Sizes: []int{23}, Indexes: []int{0, 1, 5}, Repeats: 1, Batch: 7, Timeout: time.Second}
+	c := bench.Config{Engines: []string{"postgresql"}, Sizes: []int{23}, PreloadSizes: []int{100000000}, Indexes: []int{0, 1, 5}, Repeats: 1, Batch: 7, Timeout: time.Second}
 	body, _ := json.Marshal(c)
 	for _, input := range [][3]string{{"http://evil.example", "1", "127.0.0.1:8080"}, {"", "", "127.0.0.1:8080"}, {"", "1", "evil.example:8080"}} {
 		if w := request("POST", "/api/jobs", input[0], input[1], input[2], body); w.Code != 403 {
@@ -72,6 +72,9 @@ func TestControlLifecycleAndOrigin(t *testing.T) {
 	}
 	var r bench.Report
 	json.Unmarshal(data, &r)
+	if len(r.Config.PreloadSizes) != 1 || r.Config.PreloadSizes[0] != 100000000 {
+		t.Fatal("preload setting lost")
+	}
 	if r.Completed {
 		t.Fatal("cancelled marked complete")
 	}

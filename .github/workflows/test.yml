@@ -37,7 +37,7 @@ jobs:
           BENCH_TEST_URI: mongodb://127.0.0.1:27017
           BENCH_TEST_POSTGRES_URI: postgres://benchmark:benchmark@127.0.0.1:5432/benchmark?sslmode=disable
       - name: CLI smoke test
-        run: go run ./cmd/bench -engines mongodb,postgresql -sizes 101 -repeats 1 -batch 30 -cooldown 0s -out results/smoke
+        run: go run ./cmd/bench -engines mongodb,postgresql -preload-sizes 101,307 -sizes 31 -repeats 1 -batch 30 -cooldown 0s -out results/smoke
         env:
           MONGODB_URI: mongodb://127.0.0.1:27017
           POSTGRES_URI: postgres://benchmark:benchmark@127.0.0.1:5432/benchmark?sslmode=disable

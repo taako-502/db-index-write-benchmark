@@ -9,10 +9,10 @@
 </style>
 <main>
 <header><div class="eyebrow">DATABASE / WRITE PERFORMANCE LAB</div><h1>インデックスの書き込みコストを測る</h1><p>追加インデックス数と更新対象ごとに、同じデータ・同じ書き込み条件で比較。</p><span id="status" class="status"></span><p id="meta"></p></header>
-<div class="controls"><label>データ件数<select id="size"></select></label><label>DB<select id="engine"><option value="all">両DBを比較</option></select></label><label>表示指標<select id="metric"><option value="ratio">DBごとの0本に対する所要時間倍率</option><option value="ops">スループット（件/秒）</option><option value="seconds">処理時間（秒）</option></select></label><div class="downloads"><a href="results.json" download>JSON</a><a href="results.csv" download>CSV</a></div></div>
+<div class="controls"><label>測定件数<select id="size"></select></label><label>既存件数<select id="preload"></select></label><label>DB<select id="engine"><option value="all">両DBを比較</option></select></label><label>表示指標<select id="metric"><option value="ratio">DBごとの0本に対する所要時間倍率</option><option value="ops">スループット（件/秒）</option><option value="seconds">処理時間（秒）</option></select></label><div class="downloads"><a href="results.json" download>JSON</a><a href="results.csv" download>CSV</a></div></div>
 <div id="charts" class="grid"></div>
-<p class="legend">棒：各条件の中央値 ／ 線：最小〜最大 ／ 点：各試行。倍率は「各試行の処理時間 ÷ 0本の処理時間中央値」で表示。0本も各DBの主キーインデックスを含みます。倍率の分母は同じDB・件数・操作の0本条件です。</p>
-<details open><summary>集計値</summary><div class="table-wrap"><table><thead><tr><th>DB</th><th>操作</th><th>追加本数</th><th>試行数</th><th>時間中央値（秒）</th><th>最小〜最大（秒）</th><th>件/秒 中央値</th><th>時間倍率</th></tr></thead><tbody id="table"></tbody></table></div></details>
+<p class="legend">棒：各条件の中央値 ／ 線：最小〜最大 ／ 点：各試行。倍率は「各試行の処理時間 ÷ 0本の処理時間中央値」で表示。0本も各DBの主キーインデックスを含みます。倍率の分母は同じDB・既存件数・測定件数・操作の0本条件です。</p>
+<details open><summary>集計値</summary><div class="table-wrap"><table><thead><tr><th>DB</th><th>操作</th><th>既存件数</th><th>測定件数</th><th>追加本数</th><th>試行数</th><th>時間中央値（秒）</th><th>最小〜最大（秒）</th><th>件/秒 中央値</th><th>時間倍率</th></tr></thead><tbody id="table"></tbody></table></div></details>
 <details><summary>測定条件・環境</summary><pre id="environment"></pre></details>
 <p>測定値は、応答確認までのドライバ呼び出し時間の合計です。ネットワーク・ドライバ処理を含み、初期投入・インデックス作成・バッチ準備は含みません。壁時計時間はCSV/JSONに別途記録しています。キャッシュを消去した測定ではありません。PostgreSQLは各バッチが1トランザクション、MongoDBはドキュメント単位の原子性です。絶対速度はドライバ・バッチAPI・永続化条件の差を含みます。</p>
 </main>
@@ -33,13 +33,15 @@ const engines=[...new Set(report.results?.map(r=>r.engine)||[])];
 for(const e of (report.config.engines||engines)){const o=document.createElement('option');o.value=e;o.textContent=e;$('engine').append(o)}
 $('meta').textContent=`${(report.config.engines||['mongodb']).join(' / ')} · batch ${report.config.batch_size} · ${report.config.repeats} trials · ${report.started_at}`;
 for(const n of report.config.sizes){const o=document.createElement('option');o.value=n;o.textContent=fmt(n)+' 件';$('size').append(o)}
+const preloads=report.config.preload_sizes||[];
+for(const n of (preloads.length?preloads:['legacy'])){const o=document.createElement('option');o.value=n;o.textContent=n==='legacy'?'従来モード（INSERT: 0 / UPDATE: 測定件数）':fmt(n)+' 件';$('preload').append(o)}
 $('environment').textContent=JSON.stringify({config:report.config,environment:report.environment},null,2);
 function node(tag,attrs={},text){const e=document.createElementNS(ns,tag);for(const[k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text!==undefined)e.textContent=text;return e}
 function downloadSVG(svg,name){const copy=svg.cloneNode(true);copy.setAttribute('xmlns',ns);const blob=new Blob([new XMLSerializer().serializeToString(copy)],{type:'image/svg+xml;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
 function chart(op,rows,size,metric){
  const card=document.createElement('section');card.className='card';
  const head=document.createElement('header'),title=document.createElement('h2');title.textContent=names[op];head.append(title);card.append(head);
- const p=document.createElement('p');p.textContent=descriptions[op];card.append(p);
+ const p=document.createElement('p');p.textContent=descriptions[op]+` · 既存 ${fmt(rows[0]?.preload_size??(op==='insert'?0:size))}件 / 測定 ${fmt(size)}件`;card.append(p);
  const bases=new Map(rows.filter(r=>r.indexes===0).map(r=>[r.engine,r]));
  const missing=rows.some(r=>!bases.has(r.engine));
  if(metric==='ratio'&&missing){const note=document.createElement('p');note.textContent='0本条件が未計測のDBは倍率を表示できません。';card.append(note)}
@@ -47,7 +49,7 @@ function chart(op,rows,size,metric){
  if(!rows.length){const e=document.createElement('p');e.className='empty';e.textContent='比較に必要な計測結果がまだありません';card.append(e);return card}
  const svg=node('svg',{viewBox:'0 0 600 310',role:'img','aria-label':`${names[op]}、${fmt(size)}件の比較`});
  svg.append(node('rect',{width:600,height:310,fill:'white'}));
- svg.append(node('text',{x:60,y:25,fill:'#17352e','font-family':'sans-serif','font-size':15},`${names[op]} · ${fmt(size)}件`));
+ svg.append(node('text',{x:60,y:25,fill:'#17352e','font-family':'sans-serif','font-size':15},`${names[op]} · 既存${fmt(rows[0].preload_size)} / 測定${fmt(size)}件`));
  // Summary JSON uses snake_case; map the three values explicitly.
  const values=rows.map(r=>{const scale=metric==='ratio'?bases.get(r.engine).median_seconds:1;return{r,mid:metric==='ops'?r.median_ops:r.median_seconds/scale,lo:metric==='ops'?r.min_ops:r.min_seconds/scale,hi:metric==='ops'?r.max_ops:r.max_seconds/scale}});
  const max=Math.max(...values.map(v=>v.hi),metric==='ratio'?1:0)*1.2||1;
@@ -60,16 +62,17 @@ function chart(op,rows,size,metric){
   svg.append(node('rect',{x:x-bw/2,y:y(mid),width:bw,height:250-y(mid),fill:color,rx:3,opacity:r.engine==='postgresql'?0.55:1}));
   svg.append(node('line',{x1:x,x2:x,y1:y(lo),y2:y(hi),stroke:'#17352e','stroke-width':2}));
   for(const v of[lo,hi])svg.append(node('line',{x1:x-7,x2:x+7,y1:y(v),y2:y(v),stroke:'#17352e','stroke-width':2}));
-  const samples=report.results.filter(v=>v.size===size&&v.operation===op&&v.indexes===r.indexes&&v.engine===r.engine);
+  const samples=report.results.filter(v=>v.preload_size===r.preload_size&&v.size===size&&v.operation===op&&v.indexes===r.indexes&&v.engine===r.engine);
   samples.forEach((v,j)=>{const value=metric==='ops'?v.ops_per_second:metric==='ratio'?v.seconds/bases.get(r.engine).median_seconds:v.seconds;const dot=node('circle',{cx:x+(j-(samples.length-1)/2)*Math.min(5,36/samples.length),cy:y(value),r:3,fill:'white',stroke:'#17352e'});dot.append(node('title',{},`trial ${v.trial}: ${fmt(value,4)}`));svg.append(dot)});
   svg.append(node('text',{x,y:y(hi)-10,'text-anchor':'middle',fill:'#17352e','font-size':12,'font-family':'sans-serif'},fmt(mid,metric==='ops'?0:2)));
   svg.append(node('text',{x,y:274,'text-anchor':'middle',fill:'#17352e','font-size':12,'font-family':'sans-serif'},`${r.engine==='postgresql'?'PG':'Mongo'} ${r.indexes}本`));
  });
  svg.append(node('text',{x:65,y:48,fill:'#627b6f','font-size':11,'font-family':'sans-serif'},metric==='ops'?'件/秒（高いほど速い）':metric==='ratio'?'所要時間倍率（低いほど速い）':'秒（低いほど速い）'));
  svg.append(node('text',{x:65,y:301,fill:'#627b6f','font-size':10,'font-family':'sans-serif'},'棒: 中央値 / 線: 最小〜最大 / 点: 各試行 · 0本も主キーを含む / PG: 淡色・Mongo: 濃色'));
- card.append(svg);const button=document.createElement('button');button.textContent='SVG保存';button.addEventListener('click',()=>downloadSVG(svg,`${op}-${size}-${metric}-${$('engine').value}.svg`));head.append(button);return card;
+ card.append(svg);const button=document.createElement('button');button.textContent='SVG保存';button.addEventListener('click',()=>downloadSVG(svg,`${op}-preload${rows[0].preload_size}-${size}-${metric}-${$('engine').value}.svg`));head.append(button);return card;
 }
-function render(){const size=Number($('size').value),metric=$('metric').value,rows=summary.filter(r=>r.size===size&&($('engine').value==='all'||r.engine===$('engine').value));$('charts').replaceChildren();for(const op of Object.keys(names))$('charts').append(chart(op,rows.filter(r=>r.operation===op),size,metric));$('table').replaceChildren();for(const r of rows){const tr=document.createElement('tr');for(const v of[r.engine,names[r.operation],r.indexes,r.samples,fmt(r.median_seconds,4),`${fmt(r.min_seconds,4)}〜${fmt(r.max_seconds,4)}`,fmt(r.median_ops,0),r.ratio?fmt(r.ratio,3)+'×':'—']){const td=document.createElement('td');td.textContent=v;tr.append(td)}$('table').append(tr)}}
+function render(){const size=Number($('size').value),metric=$('metric').value,rows=summary.filter(r=>r.size===size&&($('preload').value==='legacy'||r.preload_size===Number($('preload').value))&&($('engine').value==='all'||r.engine===$('engine').value));$('charts').replaceChildren();for(const op of Object.keys(names))$('charts').append(chart(op,rows.filter(r=>r.operation===op),size,metric));$('table').replaceChildren();for(const r of rows){const tr=document.createElement('tr');for(const v of[r.engine,names[r.operation],fmt(r.preload_size,0),fmt(r.size,0),r.indexes,r.samples,fmt(r.median_seconds,4),`${fmt(r.min_seconds,4)}〜${fmt(r.max_seconds,4)}`,fmt(r.median_ops,0),r.ratio?fmt(r.ratio,3)+'×':'—']){const td=document.createElement('td');td.textContent=v;tr.append(td)}$('table').append(tr)}}
+$('preload').addEventListener('change',render);
 $('engine').addEventListener('change',render);
 $('size').addEventListener('change',render);$('metric').addEventListener('change',render);render();
 </script>

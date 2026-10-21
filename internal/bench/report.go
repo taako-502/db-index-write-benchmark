@@ -17,17 +17,18 @@ import (
 var reportHTML string
 
 func ValidateReport(r Report) error {
-	if r.SchemaVersion != 1 && r.SchemaVersion != 2 {
+	if r.SchemaVersion != 1 && r.SchemaVersion != 2 && r.SchemaVersion != 3 {
 		return fmt.Errorf("unsupported schema version: %d", r.SchemaVersion)
+	}
+	if r.SchemaVersion < 3 {
+		r.Results = append([]Result(nil), r.Results...)
+		UpgradeReport(&r)
 	}
 	if err := r.Config.Validate(); err != nil {
 		return err
 	}
 	allowed := map[Case]bool{}
 	for _, k := range Plan(r.Config) {
-		if r.SchemaVersion == 1 {
-			k.Engine = ""
-		}
 		allowed[k] = true
 	}
 	seen := map[Case]bool{}
@@ -76,6 +77,14 @@ func UpgradeReport(r *Report) {
 			r.Results[i].Engine = "mongodb"
 		}
 	}
+	if r.SchemaVersion == 2 {
+		r.SchemaVersion = 3
+		for i := range r.Results {
+			if r.Results[i].Operation != "insert" {
+				r.Results[i].PreloadSize = r.Results[i].Size
+			}
+		}
+	}
 }
 func Save(dir string, r Report) error {
 	// Copy before upgrading so callers retain ownership of their slice.
@@ -94,11 +103,11 @@ func Save(dir string, r Report) error {
 	}
 	var csvBuf bytes.Buffer
 	w := csv.NewWriter(&csvBuf)
-	if err = w.Write([]string{"engine", "size", "additional_indexes", "operation", "trial", "driver_seconds", "wall_seconds", "ops_per_second", "index_bytes"}); err != nil {
+	if err = w.Write([]string{"engine", "preload_size", "size", "additional_indexes", "operation", "trial", "driver_seconds", "wall_seconds", "ops_per_second", "index_bytes"}); err != nil {
 		return err
 	}
 	for _, v := range r.Results {
-		if err = w.Write([]string{v.Engine, strconv.Itoa(v.Size), strconv.Itoa(v.Indexes), v.Operation, strconv.Itoa(v.Trial), strconv.FormatFloat(v.Seconds, 'g', -1, 64), strconv.FormatFloat(v.WallSeconds, 'g', -1, 64), strconv.FormatFloat(v.OpsPerSecond, 'g', -1, 64), strconv.FormatInt(v.IndexBytes, 10)}); err != nil {
+		if err = w.Write([]string{v.Engine, strconv.Itoa(v.PreloadSize), strconv.Itoa(v.Size), strconv.Itoa(v.Indexes), v.Operation, strconv.Itoa(v.Trial), strconv.FormatFloat(v.Seconds, 'g', -1, 64), strconv.FormatFloat(v.WallSeconds, 'g', -1, 64), strconv.FormatFloat(v.OpsPerSecond, 'g', -1, 64), strconv.FormatInt(v.IndexBytes, 10)}); err != nil {
 			return err
 		}
 	}

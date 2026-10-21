@@ -27,7 +27,7 @@ try:
     else:
         raise RuntimeError('server did not start')
     assert '計測開始' in request('/').decode()
-    config = dict(engines=['mongodb','postgresql'], sizes=[23], indexes=[0,1,5], repeats=1, batch_size=7, seed=42, journal=True, pg_fillfactor=80, operation_timeout_ns=30_000_000_000, cooldown_ns=0)
+    config = dict(engines=['mongodb','postgresql'], sizes=[23], preload_sizes=[53,101], indexes=[0,1,5], repeats=1, batch_size=7, seed=42, journal=True, pg_fillfactor=80, operation_timeout_ns=30_000_000_000, cooldown_ns=0)
     job = json.loads(request('/api/jobs', config))
     for _ in range(180):
         current = next(j for j in json.loads(request('/api/jobs')) if j['id'] == job['id'])
@@ -35,12 +35,14 @@ try:
             break
         time.sleep(0.5)
     assert current['state'] == 'completed', current
-    assert current['done'] == current['total'] == 24, current
+    assert current['done'] == current['total'] == 48, current
     report = json.loads(request('/results/' + job['id'] + '/results.json'))
+    assert {r['preload_size'] for r in report['results']} == {53,101}
+    assert all(r['size'] == 23 for r in report['results'])
     assert report['completed'] and {r['engine'] for r in report['results']} == {'mongodb','postgresql'}
     html = request('/results/' + job['id'] + '/report.html').decode()
     payload = json.loads(html.split('<script id="payload" type="application/json">')[1].split('</script>')[0])
-    assert len(payload['summary']) == 24
+    assert len(payload['summary']) == 48
     assert all(s['ratio'] == 1 for s in payload['summary'] if s['indexes'] == 0)
     config['cooldown_ns'] = 5_000_000_000
     job = json.loads(request('/api/jobs', config))
