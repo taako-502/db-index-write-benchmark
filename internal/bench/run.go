@@ -28,6 +28,7 @@ func withTimeout(ctx context.Context, d time.Duration, fn func(context.Context) 
 // Run owns a cryptographically random database. It never accepts an existing
 // database name and only drops the database it created during this invocation.
 func Run(ctx context.Context, uri string, c Config, checkpoint func(Report) error) (report Report, err error) {
+	c.Engines = []string{"mongodb"}
 	if err = c.Validate(); err != nil {
 		return report, err
 	}
@@ -79,7 +80,15 @@ func Run(ctx context.Context, uri string, c Config, checkpoint func(Report) erro
 			}
 		}
 	}
-	report = Report{SchemaVersion: 1, StartedAt: time.Now().UTC(), Config: c, Environment: env, Results: []Result{}}
+	return runPlan(ctx, c, env, func(ctx context.Context, c Config, k Case, docs []any, ids []int) (Result, error) {
+		return runCase(ctx, db, c, k, docs, ids)
+	}, checkpoint)
+}
+
+type caseExecutor func(context.Context, Config, Case, []any, []int) (Result, error)
+
+func runPlan(ctx context.Context, c Config, env map[string]string, execute caseExecutor, checkpoint func(Report) error) (report Report, err error) {
+	report = Report{SchemaVersion: 2, StartedAt: time.Now().UTC(), Config: c, Environment: env, Results: []Result{}}
 	if err = checkpoint(report); err != nil {
 		return report, err
 	}
@@ -93,7 +102,7 @@ func Run(ctx context.Context, uri string, c Config, checkpoint func(Report) erro
 	log.Printf("warm-up: %d documents per condition", warmSize)
 	for _, idx := range c.Indexes {
 		for _, op := range Operations {
-			if _, err = runCase(ctx, db, c, Case{warmSize, idx, op, 0}, warmDocs, warmIDs); err != nil {
+			if _, err = execute(ctx, c, Case{Engine: c.EngineNames()[0], Size: warmSize, Indexes: idx, Operation: op, Trial: 0}, warmDocs, warmIDs); err != nil {
 				return report, fmt.Errorf("warm-up: %w", err)
 			}
 		}
@@ -118,7 +127,7 @@ func Run(ctx context.Context, uri string, c Config, checkpoint func(Report) erro
 		}
 		log.Printf("[%d/%d] n=%d indexes=%d op=%s trial=%d", i+1, len(plan), k.Size, k.Indexes, k.Operation, k.Trial)
 		var result Result
-		result, err = runCase(ctx, db, c, k, docs, ids)
+		result, err = execute(ctx, c, k, docs, ids)
 		if err != nil {
 			return report, fmt.Errorf("%+v: %w", k, err)
 		}

@@ -1,0 +1,28 @@
+<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Index Write Lab — 計測</title>
+<style>
+:root{font-family:system-ui,sans-serif;color:#17352e;background:#f4f7f5}*{box-sizing:border-box}body{margin:0}main{max-width:1100px;margin:auto;padding:40px 24px}h1{font-size:36px;letter-spacing:-.04em}p{color:#526b62;line-height:1.7}.card{background:white;border:1px solid #dbe5df;border-radius:14px;padding:24px;margin:20px 0}.fields{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}label{display:grid;gap:7px;font-size:13px}input,select,button{font:inherit;padding:11px;border:1px solid #b9cec1;border-radius:7px;background:white;color:#17352e}button{cursor:pointer}button.primary{background:#157853;color:white}button:disabled{opacity:.5;cursor:default}.actions{display:flex;gap:12px;margin-top:22px}progress{width:100%;height:16px;accent-color:#157853}.run{border-top:1px solid #dbe5df;padding:18px 0}.links{display:flex;gap:18px;margin-top:10px}a{color:#096a4a}#error{white-space:pre-wrap;color:#a43b35}small{color:#526b62}pre{white-space:pre-wrap;overflow-wrap:anywhere}@media(max-width:700px){.fields{grid-template-columns:1fr}h1{font-size:28px}}
+</style><main><small>DATABASE / WRITE PERFORMANCE LAB</small><h1>インデックスの書き込みコストを比較</h1><p>MongoDB・PostgreSQLを同じデータと操作条件で計測。DB内の「追加0本に対する倍率」を主指標として比較します。</p>
+<form id="form" class="card"><div class="fields">
+<label>DB・実行順<select id="engines"><option value="mongodb,postgresql">MongoDB → PostgreSQL</option><option value="postgresql,mongodb">PostgreSQL → MongoDB</option><option value="mongodb">MongoDBのみ</option><option value="postgresql">PostgreSQLのみ</option></select></label>
+<label>データ件数（カンマ区切り）<input id="sizes" value="10000" required></label>
+<label>追加インデックス本数<input id="indexes" value="0,1,5" required></label>
+<label>反復数<input id="repeats" type="number" min="1" max="100" value="3" required></label>
+<label>バッチ件数<input id="batch" type="number" min="1" max="100000" value="1000" required></label>
+<label>乱数seed<input id="seed" type="number" value="42" required></label>
+<label>永続化応答<select id="journal"><option value="false">待たない（j:false / sync_commit:off）</option><option value="true">待つ（j:true / sync_commit:on）</option></select></label>
+<label>PostgreSQL fillfactor<input id="fillfactor" type="number" min="10" max="100" value="100" required></label>
+<label>セットアップ後の待機（秒）<input id="cooldown" type="number" min="0" step="0.1" value="1" required></label>
+<label>操作タイムアウト（秒）<input id="timeout" type="number" min="1" value="120" required></label>
+<label>環境メモ<input id="notes" placeholder="CPU・Docker設定・ディスクなど"></label></div>
+<p><small>DBは同時に負荷をかけず、選択した順に実行します。PostgreSQLはバッチ単位のトランザクションです。MongoDBと原子性・ストレージ構造は異なります。接続先は起動時の環境変数で指定します。</small></p>
+<div class="actions"><button class="primary" id="start">計測開始</button><button type="button" id="cancel" disabled>中断</button></div><p id="error" role="alert"></p></form>
+<section class="card"><h2>進捗・結果</h2><p>進捗は完了した試行数です。ウォームアップ・初期投入中は数値が進みません。中断しても成功した試行の結果は保存されます。</p><div id="jobs"></div></section></main>
+<script>
+const $=id=>document.getElementById(id);const labels={running:'計測中',cancelling:'中断・後片付け中',cancelled:'中断済み',completed:'完了',failed:'失敗'};
+async function command(path,body){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Bench-Request':'1'},body:JSON.stringify(body)});if(!r.ok)throw Error(await r.text());}
+const ints=id=>$(id).value.split(',').map(v=>{if(!v.trim())throw Error('空の値があります');const n=Number(v);if(!Number.isSafeInteger(n))throw Error('整数で指定してください');return n});
+$('form').addEventListener('submit',async e=>{e.preventDefault();$('error').textContent='';$('start').disabled=true;try{await command('/api/jobs',{engines:$('engines').value.split(','),sizes:ints('sizes'),indexes:ints('indexes'),repeats:+$('repeats').value,batch_size:+$('batch').value,seed:+$('seed').value,journal:$('journal').value==='true',pg_fillfactor:+$('fillfactor').value,operation_timeout_ns:+$('timeout').value*1e9,cooldown_ns:+$('cooldown').value*1e9,notes:$('notes').value});}catch(e){$('error').textContent=e.message}await refresh()});
+$('cancel').addEventListener('click',async()=>{try{await command('/api/cancel',{});await refresh()}catch(e){$('error').textContent=e.message}});
+async function refresh(){try{const r=await fetch('/api/jobs');if(!r.ok)throw Error('状態を取得できません');const jobs=await r.json()||[];const active=jobs.some(j=>['running','cancelling'].includes(j.state));$('start').disabled=active;$('cancel').disabled=!jobs.some(j=>j.state==='running');$('jobs').replaceChildren();if(!jobs.length)$('jobs').textContent='まだ計測はありません。';for(const j of jobs.slice().reverse()){const div=document.createElement('div');div.className='run';const text=document.createElement('p');text.textContent=`${labels[j.state]} · ${j.done} / ${j.total} 試行 · ${j.config.engines?.join(' → ')||'mongodb'} · ${j.config.sizes.join(', ')}件`;div.append(text);const progress=document.createElement('progress');progress.max=j.total;progress.value=j.done;div.append(progress);if(j.error){const pre=document.createElement('pre');pre.textContent=j.error;div.append(pre)}if(j.report_ready){const links=document.createElement('div');links.className='links';for(const [file,label] of [['report.html','グラフを開く'],['results.json','JSON'],['results.csv','CSV']]){const a=document.createElement('a');a.href=`/results/${j.id}/${file}`;a.textContent=label;a.target='_blank';a.rel='noopener';links.append(a)}div.append(links)}$('jobs').append(div)}}catch(e){$('error').textContent=e.message}}
+refresh();setInterval(refresh,1500);
+</script></html>

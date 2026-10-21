@@ -13,18 +13,37 @@ import (
 var Operations = []string{"insert", "update_unindexed", "update_one", "update_five"}
 
 type Config struct {
-	Sizes    []int         `json:"sizes"`
-	Indexes  []int         `json:"indexes"`
-	Repeats  int           `json:"repeats"`
-	Batch    int           `json:"batch_size"`
-	Seed     int64         `json:"seed"`
-	Journal  bool          `json:"journal"`
-	Timeout  time.Duration `json:"operation_timeout_ns"`
-	Cooldown time.Duration `json:"cooldown_ns"`
-	Notes    string        `json:"notes"`
+	Engines    []string      `json:"engines,omitempty"`
+	Fillfactor int           `json:"pg_fillfactor,omitempty"`
+	Sizes      []int         `json:"sizes"`
+	Indexes    []int         `json:"indexes"`
+	Repeats    int           `json:"repeats"`
+	Batch      int           `json:"batch_size"`
+	Seed       int64         `json:"seed"`
+	Journal    bool          `json:"journal"`
+	Timeout    time.Duration `json:"operation_timeout_ns"`
+	Cooldown   time.Duration `json:"cooldown_ns"`
+	Notes      string        `json:"notes"`
 }
 
+func (c Config) EngineNames() []string {
+	if len(c.Engines) == 0 {
+		return []string{"mongodb"}
+	}
+	return c.Engines
+}
 func (c Config) Validate() error {
+	engines := map[string]bool{}
+	for _, e := range c.EngineNames() {
+		if (e != "mongodb" && e != "postgresql") || engines[e] {
+			return fmt.Errorf("invalid or duplicate engine: %s", e)
+		}
+		engines[e] = true
+	}
+	if c.Fillfactor != 0 && (c.Fillfactor < 10 || c.Fillfactor > 100) {
+		return fmt.Errorf("fillfactor must be 10..100")
+	}
+
 	if len(c.Sizes) == 0 || len(c.Indexes) == 0 || c.Repeats < 1 || c.Batch < 1 || c.Batch > 100000 || c.Timeout <= 0 || c.Cooldown < 0 {
 		return fmt.Errorf("sizes/indexes must be nonempty, repeats >= 1, batch 1..100000, timeout > 0, cooldown >= 0")
 	}
@@ -54,6 +73,7 @@ func (c Config) Validate() error {
 }
 
 type Case struct {
+	Engine    string `json:"engine,omitempty"`
 	Size      int    `json:"size"`
 	Indexes   int    `json:"indexes"`
 	Operation string `json:"operation"`
@@ -86,7 +106,9 @@ func Plan(c Config) []Case {
 		for _, n := range c.Sizes {
 			for _, idx := range c.Indexes {
 				for _, op := range Operations {
-					round = append(round, Case{n, idx, op, trial})
+					for _, engine := range c.EngineNames() {
+						round = append(round, Case{Engine: engine, Size: n, Indexes: idx, Operation: op, Trial: trial})
+					}
 				}
 			}
 		}
@@ -141,6 +163,7 @@ func UpdateModels(ids []int, op string) []mongo.WriteModel {
 }
 
 type Summary struct {
+	Engine        string  `json:"engine"`
 	Size          int     `json:"size"`
 	Indexes       int     `json:"indexes"`
 	Operation     string  `json:"operation"`
@@ -165,12 +188,12 @@ func median(v []float64) float64 {
 
 func Summaries(results []Result) []Summary {
 	type key struct {
-		n, idx int
-		op     string
+		n, idx     int
+		op, engine string
 	}
 	groups := map[key][]Result{}
 	for _, r := range results {
-		k := key{r.Size, r.Indexes, r.Operation}
+		k := key{r.Size, r.Indexes, r.Operation, r.Engine}
 		groups[k] = append(groups[k], r)
 	}
 	var out []Summary
@@ -181,16 +204,22 @@ func Summaries(results []Result) []Summary {
 			ops[i] = r.OpsPerSecond
 		}
 		mt, mo := median(times), median(ops)
-		out = append(out, Summary{Size: k.n, Indexes: k.idx, Operation: k.op, Samples: len(rs), MedianSeconds: mt, MinSeconds: times[0], MaxSeconds: times[len(times)-1], MedianOps: mo, MinOps: ops[0], MaxOps: ops[len(ops)-1]})
+		out = append(out, Summary{Engine: k.engine, Size: k.n, Indexes: k.idx, Operation: k.op, Samples: len(rs), MedianSeconds: mt, MinSeconds: times[0], MaxSeconds: times[len(times)-1], MedianOps: mo, MinOps: ops[0], MaxOps: ops[len(ops)-1]})
 	}
 	for i := range out {
 		for _, b := range out {
-			if b.Size == out[i].Size && b.Operation == out[i].Operation && b.Indexes == 0 {
+			if b.Engine == out[i].Engine && b.Size == out[i].Size && b.Operation == out[i].Operation && b.Indexes == 0 {
 				out[i].Ratio = out[i].MedianSeconds / b.MedianSeconds
 			}
 		}
 	}
 	slices.SortFunc(out, func(a, b Summary) int {
+		if a.Engine < b.Engine {
+			return -1
+		}
+		if a.Engine > b.Engine {
+			return 1
+		}
 		if a.Size != b.Size {
 			return a.Size - b.Size
 		}

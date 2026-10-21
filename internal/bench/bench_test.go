@@ -72,7 +72,7 @@ func TestDocumentsAndUpdates(t *testing.T) {
 
 func sampleReport() Report {
 	c := smallConfig()
-	r := Report{SchemaVersion: 1, Config: c, Completed: true, Environment: map[string]string{"mongodb": "test fixture"}}
+	r := Report{SchemaVersion: 2, Config: c, Completed: true, Environment: map[string]string{"mongodb": "test fixture"}}
 	for _, k := range Plan(c) {
 		seconds := float64(k.Indexes+1) * float64(k.Trial)
 		r.Results = append(r.Results, Result{Case: k, Seconds: seconds, WallSeconds: seconds, OpsPerSecond: float64(k.Size) / seconds})
@@ -179,5 +179,56 @@ func TestMongoIntegration(t *testing.T) {
 		if v.IndexBytes <= 0 {
 			t.Fatal("missing index stats")
 		}
+	}
+}
+
+func TestEngineBaselinesAreSeparate(t *testing.T) {
+	r := sampleReport()
+	r.Config.Engines = []string{"mongodb", "postgresql"}
+	for _, v := range append([]Result(nil), r.Results...) {
+		v.Engine = "postgresql"
+		v.Seconds *= 10
+		v.WallSeconds *= 10
+		v.OpsPerSecond /= 10
+		r.Results = append(r.Results, v)
+	}
+	if err := ValidateReport(r); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range Summaries(r.Results) {
+		if s.Ratio != float64(s.Indexes+1) {
+			t.Fatalf("cross-engine baseline: %+v", s)
+		}
+	}
+	r.Results[0].Engine = "unknown"
+	if ValidateReport(r) == nil {
+		t.Fatal("accepted unknown engine")
+	}
+}
+
+func TestLegacyReportUpgrade(t *testing.T) {
+	r := sampleReport()
+	r.SchemaVersion = 1
+	r.Config.Engines = nil
+	for i := range r.Results {
+		r.Results[i].Engine = ""
+	}
+	if e := ValidateReport(r); e != nil {
+		t.Fatal(e)
+	}
+	dir := t.TempDir()
+	if e := Save(dir, r); e != nil {
+		t.Fatal(e)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "results.json"))
+	var got Report
+	if e := json.Unmarshal(b, &got); e != nil {
+		t.Fatal(e)
+	}
+	if got.SchemaVersion != 2 || got.Results[0].Engine != "mongodb" {
+		t.Fatal("legacy report not upgraded")
+	}
+	if r.Results[0].Engine != "" {
+		t.Fatal("Save mutated caller data")
 	}
 }

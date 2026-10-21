@@ -2,19 +2,19 @@
 <html lang="ja">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MongoDB · Index Write Benchmark</title>
+<title>Database · Index Write Benchmark</title>
 <style>
 :root{color-scheme:light;font-family:system-ui,-apple-system,sans-serif;color:#17352e;background:#f4f7f5}
 *{box-sizing:border-box}body{margin:0}main{max-width:1250px;margin:auto;padding:44px 26px}header{border-bottom:1px solid #cddbd4;padding-bottom:24px;margin-bottom:24px}.eyebrow{font-size:12px;font-weight:700;letter-spacing:.15em;color:#477262}h1{font-size:clamp(26px,4vw,42px);letter-spacing:-.04em;margin:12px 0}p{line-height:1.7;color:#526b62}a{color:#096a4a}.status{display:inline-block;border-radius:20px;padding:6px 12px;background:#dceee3;font-weight:650;font-size:13px}.status.partial{background:#ffebc1;color:#805600}.controls{display:flex;flex-wrap:wrap;gap:18px;align-items:end;background:#fff;padding:20px;border:1px solid #dbe5df;border-radius:14px;margin-bottom:22px}label{display:grid;gap:7px;font-size:12px;font-weight:700}select,button{font:inherit;border:1px solid #b9cec1;border-radius:7px;padding:9px;background:white;color:#17352e}button{cursor:pointer;font-size:12px}button:hover{background:#edf6f0}.downloads{margin-left:auto;font-size:13px;display:flex;gap:18px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.card{background:#fff;border:1px solid #dbe5df;border-radius:14px;padding:20px;min-width:0}.card header{display:flex;align-items:center;justify-content:space-between;border:0;padding:0;margin:0 0 8px;gap:12px}.card h2{font-size:17px;margin:0}.card p{font-size:12px;margin:0}.card svg{display:block;width:100%;height:auto}.legend{font-size:12px;margin:16px 0 24px}details{background:#fff;border:1px solid #dbe5df;border-radius:12px;padding:18px;margin-top:18px}summary{cursor:pointer;font-weight:650}pre{white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.7}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:12px;margin-top:16px}th,td{text-align:right;padding:10px;border-bottom:1px solid #e0e9e4;white-space:nowrap}th:first-child,td:first-child{text-align:left}.empty{padding:32px;text-align:center;color:#667c73}@media(max-width:760px){main{padding:24px 14px}.grid{grid-template-columns:1fr}.downloads{margin-left:0}}
 </style>
 <main>
-<header><div class="eyebrow">MONGODB / WRITE PERFORMANCE LAB</div><h1>インデックスの書き込みコストを測る</h1><p>追加インデックス数と更新対象ごとに、同じデータ・同じ書き込み条件で比較。</p><span id="status" class="status"></span><p id="meta"></p></header>
-<div class="controls"><label>データ件数<select id="size"></select></label><label>表示指標<select id="metric"><option value="ops">スループット（件/秒）</option><option value="seconds">処理時間（秒）</option><option value="ratio">0本に対する所要時間の倍率</option></select></label><div class="downloads"><a href="results.json" download>JSON</a><a href="results.csv" download>CSV</a></div></div>
+<header><div class="eyebrow">DATABASE / WRITE PERFORMANCE LAB</div><h1>インデックスの書き込みコストを測る</h1><p>追加インデックス数と更新対象ごとに、同じデータ・同じ書き込み条件で比較。</p><span id="status" class="status"></span><p id="meta"></p></header>
+<div class="controls"><label>データ件数<select id="size"></select></label><label>DB<select id="engine"><option value="all">両DBを比較</option></select></label><label>表示指標<select id="metric"><option value="ratio">DBごとの0本に対する所要時間倍率</option><option value="ops">スループット（件/秒）</option><option value="seconds">処理時間（秒）</option></select></label><div class="downloads"><a href="results.json" download>JSON</a><a href="results.csv" download>CSV</a></div></div>
 <div id="charts" class="grid"></div>
-<p class="legend">棒：各条件の中央値 ／ 線：最小〜最大 ／ 点：各試行。倍率は「各試行の処理時間 ÷ 0本の処理時間中央値」で表示。0本も _id インデックスを含みます。</p>
-<details open><summary>集計値</summary><div class="table-wrap"><table><thead><tr><th>操作</th><th>追加本数</th><th>試行数</th><th>時間中央値（秒）</th><th>最小〜最大（秒）</th><th>件/秒 中央値</th><th>時間倍率</th></tr></thead><tbody id="table"></tbody></table></div></details>
+<p class="legend">棒：各条件の中央値 ／ 線：最小〜最大 ／ 点：各試行。倍率は「各試行の処理時間 ÷ 0本の処理時間中央値」で表示。0本も各DBの主キーインデックスを含みます。倍率の分母は同じDB・件数・操作の0本条件です。</p>
+<details open><summary>集計値</summary><div class="table-wrap"><table><thead><tr><th>DB</th><th>操作</th><th>追加本数</th><th>試行数</th><th>時間中央値（秒）</th><th>最小〜最大（秒）</th><th>件/秒 中央値</th><th>時間倍率</th></tr></thead><tbody id="table"></tbody></table></div></details>
 <details><summary>測定条件・環境</summary><pre id="environment"></pre></details>
-<p>測定値は、応答確認までのドライバ呼び出し時間の合計です。ネットワーク・ドライバ処理を含み、初期投入・インデックス作成・バッチ準備は含みません。壁時計時間はCSV/JSONに別途記録しています。キャッシュを消去した測定ではありません。</p>
+<p>測定値は、応答確認までのドライバ呼び出し時間の合計です。ネットワーク・ドライバ処理を含み、初期投入・インデックス作成・バッチ準備は含みません。壁時計時間はCSV/JSONに別途記録しています。キャッシュを消去した測定ではありません。PostgreSQLは各バッチが1トランザクション、MongoDBはドキュメント単位の原子性です。絶対速度はドライバ・バッチAPI・永続化条件の差を含みます。</p>
 </main>
 <script id="payload" type="application/json">{{.}}</script>
 <script>
@@ -22,14 +22,16 @@
 const {report,summary:rawSummary}=JSON.parse(document.getElementById('payload').textContent);
 const summary=rawSummary||[];
 const names={insert:'新規 insert',update_unindexed:'インデックス対象外を更新',update_one:'field1 を更新',update_five:'field1〜5 を更新'};
-const descriptions={insert:'各追加インデックスにキーを追加',update_unindexed:'counter を +1',update_one:'1本・5本の条件とも、更新対象の追加インデックスは1本',update_five:'追加インデックス0・1・5本をそれぞれ更新'};
+const descriptions={insert:'各追加インデックスにキーを追加',update_unindexed:'counter を +1',update_one:'field1 を +1（PGの物理的なインデックス更新数はHOT等に依存）',update_five:'field1〜field5 を +1'};
 const colors=['#157853','#4b94aa','#b77930','#7565a8','#c3666e','#608638'];
 const ns='http://www.w3.org/2000/svg';
 const $=id=>document.getElementById(id);
 const fmt=(n,d=2)=>n.toLocaleString('ja-JP',{maximumFractionDigits:d});
 $('status').textContent=report.completed?'計測完了':'途中結果 — 全条件の計測は未完了';
 if(!report.completed)$('status').classList.add('partial');
-$('meta').textContent=`MongoDB ${report.environment.mongodb||'—'} · ${report.environment.go||'—'} · batch ${report.config.batch_size} · ${report.config.repeats} trials · ${report.started_at}`;
+const engines=[...new Set(report.results?.map(r=>r.engine)||[])];
+for(const e of (report.config.engines||engines)){const o=document.createElement('option');o.value=e;o.textContent=e;$('engine').append(o)}
+$('meta').textContent=`${(report.config.engines||['mongodb']).join(' / ')} · batch ${report.config.batch_size} · ${report.config.repeats} trials · ${report.started_at}`;
 for(const n of report.config.sizes){const o=document.createElement('option');o.value=n;o.textContent=fmt(n)+' 件';$('size').append(o)}
 $('environment').textContent=JSON.stringify({config:report.config,environment:report.environment},null,2);
 function node(tag,attrs={},text){const e=document.createElementNS(ns,tag);for(const[k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text!==undefined)e.textContent=text;return e}
@@ -38,13 +40,16 @@ function chart(op,rows,size,metric){
  const card=document.createElement('section');card.className='card';
  const head=document.createElement('header'),title=document.createElement('h2');title.textContent=names[op];head.append(title);card.append(head);
  const p=document.createElement('p');p.textContent=descriptions[op];card.append(p);
- const base=rows.find(r=>r.indexes===0);
- if(!rows.length||(metric==='ratio'&&!base)){const e=document.createElement('p');e.className='empty';e.textContent='比較に必要な計測結果がまだありません';card.append(e);return card}
+ const bases=new Map(rows.filter(r=>r.indexes===0).map(r=>[r.engine,r]));
+ const missing=rows.some(r=>!bases.has(r.engine));
+ if(metric==='ratio'&&missing){const note=document.createElement('p');note.textContent='0本条件が未計測のDBは倍率を表示できません。';card.append(note)}
+ if(metric==='ratio')rows=rows.filter(r=>bases.has(r.engine));
+ if(!rows.length){const e=document.createElement('p');e.className='empty';e.textContent='比較に必要な計測結果がまだありません';card.append(e);return card}
  const svg=node('svg',{viewBox:'0 0 600 310',role:'img','aria-label':`${names[op]}、${fmt(size)}件の比較`});
  svg.append(node('rect',{width:600,height:310,fill:'white'}));
  svg.append(node('text',{x:60,y:25,fill:'#17352e','font-family':'sans-serif','font-size':15},`${names[op]} · ${fmt(size)}件`));
  // Summary JSON uses snake_case; map the three values explicitly.
- const values=rows.map(r=>{const scale=metric==='ratio'?base.median_seconds:1;return{r,mid:metric==='ops'?r.median_ops:r.median_seconds/scale,lo:metric==='ops'?r.min_ops:r.min_seconds/scale,hi:metric==='ops'?r.max_ops:r.max_seconds/scale}});
+ const values=rows.map(r=>{const scale=metric==='ratio'?bases.get(r.engine).median_seconds:1;return{r,mid:metric==='ops'?r.median_ops:r.median_seconds/scale,lo:metric==='ops'?r.min_ops:r.min_seconds/scale,hi:metric==='ops'?r.max_ops:r.max_seconds/scale}});
  const max=Math.max(...values.map(v=>v.hi),metric==='ratio'?1:0)*1.2||1;
  const y=v=>250-v/max*185;
  for(let i=0;i<=4;i++){const value=max*i/4,yy=y(value);svg.append(node('line',{x1:65,x2:580,y1:yy,y2:yy,stroke:'#e3ebe6'}));svg.append(node('text',{x:58,y:yy+4,'text-anchor':'end',fill:'#627b6f','font-size':11,'font-family':'sans-serif'},fmt(value,value<10?2:0)))}
@@ -52,19 +57,20 @@ function chart(op,rows,size,metric){
  const step=500/values.length,bw=Math.min(75,step*.5);
  values.forEach(({r,mid,lo,hi},i)=>{
   const x=75+step*(i+.5),color=colors[r.indexes%colors.length];
-  svg.append(node('rect',{x:x-bw/2,y:y(mid),width:bw,height:250-y(mid),fill:color,rx:3}));
+  svg.append(node('rect',{x:x-bw/2,y:y(mid),width:bw,height:250-y(mid),fill:color,rx:3,opacity:r.engine==='postgresql'?0.55:1}));
   svg.append(node('line',{x1:x,x2:x,y1:y(lo),y2:y(hi),stroke:'#17352e','stroke-width':2}));
   for(const v of[lo,hi])svg.append(node('line',{x1:x-7,x2:x+7,y1:y(v),y2:y(v),stroke:'#17352e','stroke-width':2}));
-  const samples=report.results.filter(v=>v.size===size&&v.operation===op&&v.indexes===r.indexes);
-  samples.forEach((v,j)=>{const value=metric==='ops'?v.ops_per_second:metric==='ratio'?v.seconds/base.median_seconds:v.seconds;const dot=node('circle',{cx:x+(j-(samples.length-1)/2)*Math.min(5,36/samples.length),cy:y(value),r:3,fill:'white',stroke:'#17352e'});dot.append(node('title',{},`trial ${v.trial}: ${fmt(value,4)}`));svg.append(dot)});
+  const samples=report.results.filter(v=>v.size===size&&v.operation===op&&v.indexes===r.indexes&&v.engine===r.engine);
+  samples.forEach((v,j)=>{const value=metric==='ops'?v.ops_per_second:metric==='ratio'?v.seconds/bases.get(r.engine).median_seconds:v.seconds;const dot=node('circle',{cx:x+(j-(samples.length-1)/2)*Math.min(5,36/samples.length),cy:y(value),r:3,fill:'white',stroke:'#17352e'});dot.append(node('title',{},`trial ${v.trial}: ${fmt(value,4)}`));svg.append(dot)});
   svg.append(node('text',{x,y:y(hi)-10,'text-anchor':'middle',fill:'#17352e','font-size':12,'font-family':'sans-serif'},fmt(mid,metric==='ops'?0:2)));
-  svg.append(node('text',{x,y:274,'text-anchor':'middle',fill:'#17352e','font-size':12,'font-family':'sans-serif'},`追加 ${r.indexes} 本`));
+  svg.append(node('text',{x,y:274,'text-anchor':'middle',fill:'#17352e','font-size':12,'font-family':'sans-serif'},`${r.engine==='postgresql'?'PG':'Mongo'} ${r.indexes}本`));
  });
  svg.append(node('text',{x:65,y:48,fill:'#627b6f','font-size':11,'font-family':'sans-serif'},metric==='ops'?'件/秒（高いほど速い）':metric==='ratio'?'所要時間倍率（低いほど速い）':'秒（低いほど速い）'));
- svg.append(node('text',{x:65,y:301,fill:'#627b6f','font-size':10,'font-family':'sans-serif'},'棒: 中央値 / 線: 最小〜最大 / 点: 各試行 · 0本も _id インデックスを含む'));
- card.append(svg);const button=document.createElement('button');button.textContent='SVG保存';button.addEventListener('click',()=>downloadSVG(svg,`${op}-${size}-${metric}.svg`));head.append(button);return card;
+ svg.append(node('text',{x:65,y:301,fill:'#627b6f','font-size':10,'font-family':'sans-serif'},'棒: 中央値 / 線: 最小〜最大 / 点: 各試行 · 0本も主キーを含む / PG: 淡色・Mongo: 濃色'));
+ card.append(svg);const button=document.createElement('button');button.textContent='SVG保存';button.addEventListener('click',()=>downloadSVG(svg,`${op}-${size}-${metric}-${$('engine').value}.svg`));head.append(button);return card;
 }
-function render(){const size=Number($('size').value),metric=$('metric').value,rows=summary.filter(r=>r.size===size);$('charts').replaceChildren();for(const op of Object.keys(names))$('charts').append(chart(op,rows.filter(r=>r.operation===op),size,metric));$('table').replaceChildren();for(const r of rows){const tr=document.createElement('tr');for(const v of[names[r.operation],r.indexes,r.samples,fmt(r.median_seconds,4),`${fmt(r.min_seconds,4)}〜${fmt(r.max_seconds,4)}`,fmt(r.median_ops,0),r.ratio?fmt(r.ratio,3)+'×':'—']){const td=document.createElement('td');td.textContent=v;tr.append(td)}$('table').append(tr)}}
+function render(){const size=Number($('size').value),metric=$('metric').value,rows=summary.filter(r=>r.size===size&&($('engine').value==='all'||r.engine===$('engine').value));$('charts').replaceChildren();for(const op of Object.keys(names))$('charts').append(chart(op,rows.filter(r=>r.operation===op),size,metric));$('table').replaceChildren();for(const r of rows){const tr=document.createElement('tr');for(const v of[r.engine,names[r.operation],r.indexes,r.samples,fmt(r.median_seconds,4),`${fmt(r.min_seconds,4)}〜${fmt(r.max_seconds,4)}`,fmt(r.median_ops,0),r.ratio?fmt(r.ratio,3)+'×':'—']){const td=document.createElement('td');td.textContent=v;tr.append(td)}$('table').append(tr)}}
+$('engine').addEventListener('change',render);
 $('size').addEventListener('change',render);$('metric').addEventListener('change',render);render();
 </script>
 </html>

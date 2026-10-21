@@ -13,5 +13,24 @@ services:
       interval: 2s
       timeout: 5s
       retries: 30
+  postgresql:
+    image: postgres:17.6
+    environment:
+      POSTGRES_USER: benchmark
+      POSTGRES_PASSWORD: benchmark
+      POSTGRES_DB: benchmark
+    ports:
+      - "127.0.0.1:5433:5432"
+    command: ["postgres", "-c", "shared_buffers=1GB"]
+    cpus: 2
+    mem_limit: 3g
+    volumes:
+      - postgres-benchmark-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U benchmark -d benchmark"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
 volumes:
+  postgres-benchmark-data:
   benchmark-data:
