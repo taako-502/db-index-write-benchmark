@@ -1,6 +1,6 @@
 module github.com/taako-502/mongodb-index-write-benchmark
 
-go 1.27.0
+go 1.27
 
 require go.mongodb.org/mongo-driver/v2 v2.5.0
 
