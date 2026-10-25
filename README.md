@@ -4,7 +4,7 @@ MongoDB・PostgreSQLの追加インデックス数と更新対象による書き
 
 ## 実行方法
 
-必要なもの：Go 1.27.0以降、Docker Compose。
+必要なもの：Go 1.27以降、Docker Compose。
 
 ### ブラウザでDBと条件を選んで実行
 
