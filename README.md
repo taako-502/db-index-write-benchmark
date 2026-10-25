@@ -1,154 +1,49 @@
 # MongoDB・PostgreSQLのインデックス書き込み性能ベンチマーク
 
-MongoDB・PostgreSQLの追加インデックス数と更新対象による書き込み性能の違いを、Go 1.27で測定します。結果はJSON・CSVと、オフラインで開けるHTMLグラフに出力します。
+**インデックスを増やすと、挿入や更新にどれだけ時間がかかるか**を測るツールです。MongoDBとPostgreSQLで、追加インデックスの本数と更新するフィールドを変えて計測し、結果をJSON・CSV・HTMLグラフに保存します。Go 1.27で動作します。
 
-## 実行方法
+主に見るのは、**同じDB・データ件数・操作で、追加インデックス0本に対して処理時間が何倍になったか**です。両DBは書き込みAPIやトランザクションの仕組みが異なるため、DB間の速度差を読む際は[比較条件](#比較条件とdbごとの違い)も確認してください。
 
-必要なもの：Go 1.27以降、Docker Compose。
+## まず小規模で試す
 
-### ブラウザでDBと条件を選んで実行
-
-```sh
-docker compose up -d --wait
-go run ./cmd/bench -serve
-open http://127.0.0.1:8080
-```
-
-DB（片方・両方）、DBの実行順、データ件数、追加本数、反復数、バッチ件数、seed、永続化待ち、PostgreSQLのfillfactor、待機時間、タイムアウトを設定できます。同時に実行できる計測は1つです。進捗は成功した試行数で、ウォームアップや初期投入中は進みません。「中断」は実行をキャンセルし、専用DB/スキーマを削除します。成功済みの結果は残ります。
-
-画面は `127.0.0.1:8080` でのみ待ち受けます（`-listen` は数値ループバックアドレスのみ）。出力は `results/<実行ID>/`、`-out` でルートを指定できます。画面の履歴はサーバー起動中の実行を表示します。再起動後も保存済みHTMLを直接開けます。接続先のURIや認証情報をブラウザから変更する機能はありません。
-
-### CLIでMongoDB・PostgreSQLの両方を実行
-
-```sh
-go run ./cmd/bench -engines mongodb,postgresql -sizes 10000 -repeats 3 -out results/compare
-open results/compare/report.html
-# 本計測。必要に応じて別実行でDB順序を逆転してください。
-go run ./cmd/bench -engines postgresql,mongodb -sizes 100000,1000000 -repeats 5 -out results/full-pg-first
-```
-
-### CLIでMongoDBのみを実行（既定）
-
-`-engines` を省略するとMongoDBのみを測定します。
+必要なものはGo 1.27以降とDocker Composeです。リポジトリのルートで次を実行します。
 
 ```sh
 docker compose up -d --wait
-go run ./cmd/bench -sizes 10000 -repeats 2 -out results/quick
-open results/quick/report.html  # macOS。ほかのOSではブラウザで開く
+go run ./cmd/bench -engines mongodb,postgresql -sizes 10000 -repeats 3 -out results/quick
 ```
 
-本計測（2データ件数 × 3インデックス条件 × 4操作 × 5試行 = 120試行）：
+MongoDB → PostgreSQLの順に、1万件・追加インデックス0/1/5本・4種類の操作を各3回測定します。ウォームアップを除き、合計72試行です。
+
+完了したら、`results/quick/report.html`をブラウザで開きます。macOSでは次のコマンドを使えます。
 
 ```sh
-go run ./cmd/bench \
-  -sizes 100000,1000000 \
-  -indexes 0,1,5 \
-  -repeats 5 \
-  -batch 1000 \
-  -seed 42 \
-  -notes 'MacBook Pro / メモリ24GB / Docker: CPU 2, RAM 3GB / SSD' \
-  -out results/full
-open results/full/report.html
+open results/quick/report.html
 ```
 
-`-notes`は実際の環境に書き換えてください。実行時間は環境に依存し、100万件を各条件で初期投入し直すため時間がかかります。最初に小規模で動作確認してください。
+出力先は毎回新しいディレクトリを指定してください。同じコマンドを再実行する場合は、`results/quick-2`などに変更します。
 
-### コンテナの停止
+終了後はコンテナを停止できます。ボリュームは保持されます。
 
 ```sh
-docker compose down  # 検証用コンテナの停止。ボリュームは保持
+docker compose down
 ```
 
-## 比較条件とDBの設定
+## 結果の読み方
 
-### MongoDBの実行環境
+### 最初に見る指標
 
-ComposeはMongoDB **8.0.16**、CPU 2、メモリ3GB、WiredTigerキャッシュ1GBで固定し、ホストの`127.0.0.1:27018`に公開します。既存のローカルMongoDBと衝突しにくいポートを使っています。Goドライバはv2.5.0を固定しています。
+HTMLでデータ件数とDBを選び、「DBごとの0本に対する所要時間倍率」を確認します。
 
-### MongoDB・PostgreSQLの条件と実装の違い
+- **1倍**：追加インデックス0本と同じ時間。
+- **2倍**：同じ件数の書き込みに、0本条件の2倍の時間がかかった。
+- **1倍未満**：その実行では0本条件より短い時間だった。試行ごとのばらつきも確認する。
 
-両DBは順次実行し、各DB内の条件順は同じseedでシャッフルします。DBの実行順はランダム化しません。時間経過による温度や負荷の偏りを確認するには、順序を逆転した別実行を比較してください。
+「0本」は追加インデックスの本数です。MongoDBの`_id`インデックス、PostgreSQLの`id`のPRIMARY KEYは常に存在します。両DBを表示しても、倍率の分母は各DB自身の0本条件です。
 
-| 条件 | MongoDB | PostgreSQL |
-|---|---|---|
-| データ | int64の同じ7フィールド | bigintの同じ7列（`_id` → `id`） |
-| 基準 | `_id`インデックス | `id`のPRIMARY KEY |
-| 追加 | 0〜5本の単一フィールドインデックス | 0〜5本のB-tree単一列インデックス |
-| insert | InsertMany（ordered） | pgx SendBatch、1行1 INSERT |
-| update | BulkWrite（ordered）、`_id_` hint | pgx SendBatch、1行1 UPDATE、主キーで検索 |
-| バッチ境界 | 複数ドキュメントのトランザクションなし | 各バッチが暗黙の1トランザクション |
-| 永続化待ちなし | w:1, j:false | synchronous_commit=off |
-| 永続化待ちあり | w:1, j:true | synchronous_commit=on |
-| 初期状態 | 各試行で新規コレクション | 各試行で新規テーブル |
+棒は中央値、線は最小〜最大、点は各試行を表します。最小〜最大は信頼区間ではありません。両DB表示では濃色がMongoDB、淡色がPostgreSQLです。「スループット（件/秒）」や「処理時間（秒）」にも切り替えられます。
 
-**主指標は同じDB・件数・操作の追加0本に対する時間倍率です。** HTMLのDB選択で片方・両方を表示できます。両DB表示では各DBの0本をそれぞれ分母にし、濃色がMongoDB、淡色がPostgreSQLです。JSON/CSVの各行にもDB名を保存します。旧schema_version=1のMongoDB結果も `-report` で再生成できます。
-
-原子性、通信方式、エンコード、バッチ内のSQL実行回数、ストレージ構造は異なります。絶対的な件数/秒はこれらを含むエンドツーエンドの測定です。トランザクション保証やキャッシュ容量が完全に同じとは解釈しないでください。COPYや複数VALUES文は今回使いません。PostgreSQLではバッチ送信から全応答とcommit応答を取得するCloseまでを測定します。バッチの準備・BSONからの共通データ変換は除外します。
-
-### PostgreSQLの実行環境と更新特性
-
-PostgreSQLは **17.6**、CPU 2、メモリ3GB、shared_buffers=1GB、ホストポート5433です。MongoDBのWiredTigerキャッシュ1GBとshared_buffers=1GBは同じ意味のメモリ上限ではありません。pgxはv5.7.6を固定します。`POSTGRES_URI` の既定値は `postgres://benchmark:benchmark@127.0.0.1:5433/benchmark?sslmode=disable`（ローカル検証専用）です。既存DBにランダム名の専用スキーマを作成し、そのスキーマだけを削除します。接続ユーザーにはスキーマ作成権限が必要です。
-
-PostgreSQLは初期投入後にANALYZEを行い、セッション内で `enable_seqscan=off` にして主キー検索を優先します。強制hintではありません。fillfactorは既定100、autovacuumは有効です。これらとserver_version、shared_buffers、synchronous_commit、fsync、full_page_writes、wal_levelを結果に記録します。接続先URIは記録しません。
-
-**PostgreSQLの物理的なインデックス更新数は、変更した列の本数とは一致しません。** HOT更新の可否は対象列がインデックスに含まれるかに加え、元のページの空き容量にも依存します。fillfactorを変更した実験は別条件として保存してください。MVCCによる新しい行バージョンやVACUUMもMongoDBとの違いに含まれます。
-
-参考： [PostgreSQL HOT](https://www.postgresql.org/docs/17/storage-hot.html)、[synchronous_commit](https://www.postgresql.org/docs/17/runtime-config-wal.html#GUC-SYNCHRONOUS-COMMIT)、[pgx SendBatch](https://pkg.go.dev/github.com/jackc/pgx/v5#Conn.SendBatch)。
-
-### MongoDBのインデックスと書き込み操作
-
-全条件で`_id`インデックスは存在します。「0本」は**追加インデックス0本**です。
-
-| 追加本数 | 定義 |
-|---|---|
-| 0 | `_id`のみ |
-| 1 | `_id` + `{field1: 1}` |
-| 5 | `_id` + `field1`〜`field5`それぞれの単一フィールドインデックス |
-
-| 操作 | 内容 | 更新される追加インデックス数（0本 / 1本 / 5本条件） |
-|---|---|---|
-| `insert` | 空のコレクションへN件を投入 | 0 / 1 / 5 |
-| `update_unindexed` | `counter`を`$inc: 1` | 0 / 0 / 0 |
-| `update_one` | `field1`を`$inc: 1` | 0 / 1 / 1 |
-| `update_five` | `field1`〜`field5`をすべて`$inc: 1` | 0 / 1 / 5 |
-
-updateでは毎回N件を初期投入し、全ドキュメントを1回ずつ更新します。検索は`_id`の完全一致、`hint: "_id_"`で固定します。`$inc`で値を実際に変更し、各バッチの`ModifiedCount`も確認します。複合・unique・sparse・multikeyインデックスは今回の対象外です。
-
-ドキュメントは`_id`、`counter`、`field1`〜`field5`のint64値です。`_id`は連番、追加フィールドは固定seedで生成する0〜999,999,999の疑似乱数です。更新対象の順序も固定seedでシャッフルし、全条件・全試行で同じ順序にします。ドキュメントのフィールド数と数値型は更新前後で変わりません。
-
-## 計測方法と測定範囲
-
-以下のDB固有表記はMongoDBです。PostgreSQLとの差は「MongoDB・PostgreSQLの条件と実装の違い」を参照してください。
-
-### 試行の流れ
-
-1. 実行ごとにランダムな名前の専用DBを作成。
-2. 各操作・インデックス条件を最大1,000件でウォームアップ（集計対象外）。
-3. 各試行でコレクションを再作成し、インデックスを作成。updateの場合は初期データを投入。
-4. 設定した待機時間（既定1秒）を置き、Go側でGCを実施。
-5. 同時実行数1でバッチ書き込みを実施。
-6. 件数を検証し、結果を保存。次の条件へ進む。
-7. 通常終了・エラー・Ctrl+C時に、その実行が作成した専用DBを削除。
-
-各ラウンドで全条件を1回ずつ実施し、条件の順番をseedに基づいてシャッフルします。`w:1, j:false`が既定で、書き込み・読み込みの自動リトライは無効です。ジャーナルへの永続化を待つ比較は別実行で`-journal`を指定してください。`j:false`はジャーナリング自体の無効化を意味しません。
-
-### 計測時間に含む処理・含まない処理
-
-**主指標は「各バッチのドライバ呼び出し開始から応答まで」の合計時間です。** データ生成・初期BSON生成・更新モデルの準備・接続・インデックス作成・初期投入・結果検証・レポート生成は含みません。ドライバ内部の処理、更新コマンドのBSONエンコード、ネットワーク往復、サーバー処理、呼び出し中に発生したGCは含みます。サーバー内部だけの処理時間ではありません。
-
-別途、バッチ準備とループ処理を含む書き込みフェーズ全体の壁時計時間（`wall_seconds`）も保存します。
-
-### 測定条件と解釈上の注意
-
-- insertは`InsertMany`、updateは`BulkWrite`（ordered=true）。
-- `-batch 1`も1件入りの同じAPIを使用します。`InsertOne`/`UpdateOne`の専用ベンチマークではありません。
-- 更新は初期投入直後なので、キャッシュが温まった条件です。OS・WiredTigerキャッシュの消去はしていません。
-- 事前生成したデータをクライアントメモリに保持します。データ件数に比例してクライアントのメモリも増えます。
-- デフォルトデータは小さく、データ件数を増やしても必ずキャッシュ超過を再現するわけではありません。
-- 一括投入の速度を測るため、同じ件数の範囲でもインデックスは投入中に成長します。一定サイズの既存コレクションに追記する実験とは条件が異なります。
-- 他の負荷、CPU温度、ディスク、Docker VMのリソース、チェックポイント等の影響は残ります。条件順のシャッフルや5回の反復で消えるとは限りません。
-
-## 結果の確認とレポート
+倍率は「対象条件の時間中央値 ÷ 同じDB・件数・操作の0本条件の時間中央値」です。倍率の点・範囲にも、この固定分母を使います。スループットは各試行の「件数 ÷ ドライバ呼び出し時間」を求めてから中央値を計算します。
 
 ### 出力ファイル
 
@@ -156,29 +51,168 @@ updateでは毎回N件を初期投入し、全ドキュメントを1回ずつ更
 |---|---|
 | `results.json` | 設定・環境・全試行の実測値・完了状態 |
 | `results.csv` | 各試行の時間、件数/秒、インデックス容量 |
-| `report.html` | データ件数・表示指標を切り替えるグラフと集計表 |
+| `report.html` | データ件数・DB・表示指標を切り替えるグラフと集計表 |
 
-HTMLにはデータと描画処理を埋め込み、CDNやWebサーバーを使いません。各グラフの「SVG保存」で記事用の画像を保存できます。JSON/CSVへのリンクも使う場合は、3ファイルを同じフォルダに置いてください。
+HTMLはデータと描画処理を内包するため、オフラインで開けます。各グラフの「SVG保存」で画像を保存できます。JSON/CSVへのリンクも使う場合は、3ファイルを同じフォルダに置いてください。
 
-### グラフの読み方
+インデックス容量は測定後の補助情報です。MongoDBは`collStats.totalIndexSize`（`_id`を含む）、PostgreSQLは`pg_indexes_size`（PRIMARY KEYを含む）を保存します。
 
-- 棒：中央値、線：最小〜最大、点：各試行。
-- スループットは各試行で`N / driver_seconds`を求めてから中央値を計算。
-- 時間倍率は「対象条件の時間中央値 / 同じ件数・同じ操作の0本条件の時間中央値」。倍率の点・範囲も0本の時間中央値を固定分母に使用。
-- 最小〜最大は信頼区間ではありません。
-- 容量は測定後の`collStats.totalIndexSize`（`_id`を含む）。物理容量の補助情報です。
+### 中断した場合・レポートを再生成する場合
 
-### 途中結果の保存と上書き防止
+成功した試行ごとにファイルを更新します。中断・失敗した試行は集計せず、それ以前の結果を`completed:false`として残します。途中結果であることはHTMLにも表示します。0本条件が未計測のDBは倍率を表示できません。
 
-成功した試行ごとにファイルを更新します。中断・失敗した試行は集計せず、それ以前の結果を`completed:false`として残します。初期接続前のエラーでは結果ファイルが作られません。途中結果はHTMLでも明示します。出力先に既存ディレクトリを指定した場合はエラーにし、過去の結果を上書きしません。
-
-### 保存済みJSONからレポートを再生成
-
-DBに接続せず、保存済みJSONからHTML/CSVを再生成できます。
+保存済みJSONから、DBに接続せずHTML/CSVを再生成できます。旧`schema_version=1`のMongoDB結果にも対応します。
 
 ```sh
-go run ./cmd/bench -report results/full/results.json -out results/regenerated
+go run ./cmd/bench -report results/quick/results.json -out results/regenerated
 ```
+
+## 実行方法を変える
+
+いずれも、計測対象のDBを起動してから実行してください。
+
+### ブラウザで条件を設定する
+
+```sh
+docker compose up -d --wait
+go run ./cmd/bench -serve
+```
+
+`http://127.0.0.1:8080`をブラウザで開きます。初期設定は両DB・1万件・追加インデックス0/1/5本・3回反復です。「計測開始」を押すと実行します。
+
+DBと実行順、データ件数、追加本数、反復数、バッチ件数、乱数seed、永続化応答の待機、PostgreSQLのfillfactor、セットアップ後の待機時間、タイムアウト、環境メモを変更できます。
+
+同時に実行できる計測は1つです。進捗は成功した試行数で、ウォームアップや初期投入中は進みません。「中断」は実行をキャンセルし、その実行の専用DB/スキーマを削除します。成功済みの結果は残ります。
+
+出力は`results/<実行ID>/`です。`-out`で出力ルートを変更できます。履歴に表示するのはサーバー起動中の実行で、再起動後も保存済みHTMLを直接開けます。
+
+画面は既定で`127.0.0.1:8080`で待ち受け、`-listen`には数値ループバックアドレスのみ指定できます。接続先URIや認証情報は、サーバー起動時の環境変数で設定します。
+
+### CLIで片方のDBだけ測定する
+
+```sh
+# MongoDBのみ（-enginesを省略した場合も同じ）
+go run ./cmd/bench -engines mongodb -sizes 10000 -repeats 3 -out results/mongo
+
+# PostgreSQLのみ
+go run ./cmd/bench -engines postgresql -sizes 10000 -repeats 3 -out results/postgres
+```
+
+### データ件数と反復数を増やす
+
+小規模で動作確認した後に実行してください。次の例は、2 DB × 2データ件数 × 3インデックス条件 × 4操作 × 5試行 = 240試行です。
+
+```sh
+go run ./cmd/bench \
+  -engines mongodb,postgresql \
+  -sizes 100000,1000000 \
+  -indexes 0,1,5 \
+  -repeats 5 \
+  -batch 1000 \
+  -seed 42 \
+  -notes 'MacBook Pro / メモリ24GB / 各DBコンテナ: CPU 2, RAM 3GB / SSD' \
+  -out results/full
+```
+
+`-notes`は実際の環境に書き換えてください。各試行でコレクション/テーブルを作り直し、更新試行では初期データも投入し直すため、実行時間は長くなります。
+
+DBの実行順は指定した順で固定です。時間経過による温度や負荷の偏りを確認するには、`-engines postgresql,mongodb`として別の出力先で実行し、結果を比較してください。
+
+## 比較条件とDBごとの違い
+
+### 共通のデータと操作
+
+各データは`_id`（PostgreSQLでは`id`）、`counter`、`field1`〜`field5`の7項目です。MongoDBはint64、PostgreSQLはbigintを使います。IDは連番、`counter`の初期値は0、`field1`〜`field5`は固定seedで生成する0〜999,999,999の疑似乱数です。
+
+| 追加インデックス本数 | 対象 |
+|---|---|
+| 0 | IDのインデックスのみ |
+| 1 | IDに加えて`field1` |
+| 5 | IDに加えて`field1`〜`field5`それぞれの単一フィールド/列インデックス |
+
+既定の比較条件は0/1/5本です。`-indexes`で0〜5本の範囲を指定でき、基準となる0本を必ず含めます。複合・unique（ID以外）・sparse・multikeyインデックスは対象外です。
+
+| 操作 | 内容 | 更新対象に含まれる追加インデックス数（0本 / 1本 / 5本条件） |
+|---|---|---|
+| `insert` | 空のコレクション/テーブルへN件を投入 | 0 / 1 / 5 |
+| `update_unindexed` | `counter`に1を加算 | 0 / 0 / 0 |
+| `update_one` | `field1`に1を加算 | 0 / 1 / 1 |
+| `update_five` | `field1`〜`field5`すべてに1を加算 | 0 / 1 / 5 |
+
+更新試行では毎回N件を初期投入し、IDの完全一致で全件を1回ずつ更新します。更新順は固定seedでシャッフルし、同じデータ件数では全条件・全試行で同じ順序を使います。フィールド数と数値型は更新前後で変わりません。
+
+**表の本数は、DB内部で物理的に更新されるインデックス数を保証するものではありません。** 特にPostgreSQLでは、後述するHOT更新やMVCCの影響があります。
+
+### 書き込み方式の違い
+
+| 条件 | MongoDB | PostgreSQL |
+|---|---|---|
+| 基準となるインデックス | `_id`インデックス | `id`のPRIMARY KEY |
+| 追加インデックス | 単一フィールドインデックス | B-tree単一列インデックス |
+| 挿入API | InsertMany（ordered） | pgx SendBatch、1行1 INSERT |
+| 更新API | BulkWrite（ordered）、`_id_` hint | pgx SendBatch、1行1 UPDATE、主キーで検索 |
+| バッチ境界 | 複数ドキュメントのトランザクションなし | 各バッチが暗黙の1トランザクション |
+| 永続化応答を待たない（既定） | w:1, j:false | synchronous_commit=off |
+| 永続化応答を待つ（`-journal`） | w:1, j:true | synchronous_commit=on |
+| 各試行の初期状態 | 新規コレクション | 新規テーブル |
+
+原子性、通信方式、エンコード、バッチ内のSQL実行回数、ストレージ構造は異なります。件数/秒はこれらを含むエンドツーエンドの測定です。トランザクション保証やキャッシュ容量が完全に同じとは解釈しないでください。PostgreSQLのCOPYや複数VALUES文は使いません。
+
+MongoDBの書き込み・読み込みの自動リトライは無効です。`j:false`はジャーナリング自体の無効化を意味しません。永続化応答の待機を比較する場合は、`-journal`を付けた別実行として保存してください。
+
+### Docker Composeの実行環境
+
+| 設定 | MongoDB | PostgreSQL |
+|---|---|---|
+| サーバーバージョン | 8.0.16 | 17.6 |
+| 各コンテナのCPU / メモリ上限 | 2 CPU / 3GB | 2 CPU / 3GB |
+| DBのキャッシュ設定 | WiredTigerキャッシュ1GB | shared_buffers=1GB |
+| ホストの接続先 | `127.0.0.1:27018` | `127.0.0.1:5433` |
+
+WiredTigerキャッシュとshared_buffersは、同じ意味のメモリ上限ではありません。Goドライバーのバージョンは[go.mod](go.mod)、コンテナの設定は[compose.yaml](compose.yaml)で管理します。実際に使ったDB・ドライバーのバージョンは結果にも記録します。
+
+### PostgreSQLの更新特性
+
+更新試行では初期投入後にANALYZEを実行します。セッション内で`enable_seqscan=off`として主キー検索を優先しますが、強制hintではありません。fillfactorは既定100で、autovacuumの設定は変更しません。
+
+HOT更新の可否は、更新する列がインデックスに含まれるかに加え、元のページの空き容量にも依存します。MVCCによる新しい行バージョンやVACUUMもMongoDBとの違いに含まれます。fillfactorを変えた実験は、別条件として保存してください。
+
+fillfactor、server_version、shared_buffers、synchronous_commit、fsync、full_page_writes、wal_level、autovacuumを結果に記録します。
+
+## 計測方法と測定範囲
+
+### 試行の流れ（両DB共通）
+
+1. 実行ごとに専用の領域を用意する。MongoDBはランダム名のDB、PostgreSQLは接続先DB内のランダム名のスキーマを使う。
+2. 各操作・インデックス条件を最大1,000件でウォームアップする（集計対象外）。
+3. 各試行でコレクション/テーブルとインデックスを作り直す。更新試行では初期データを投入する。
+4. 設定した待機時間（既定1秒）を置き、Go側でGCを実施する。
+5. 同時実行数1でバッチ書き込みを行う。
+6. 件数を検証して結果を保存し、次の条件へ進む。
+7. 通常終了・エラー・Ctrl+C時に、その実行の専用DB/スキーマを削除する。
+
+各ラウンドで全条件を1回ずつ実施し、条件の順番をseedに基づいてシャッフルします。両DBは順次実行し、各DB内では同じseedによる条件順を使います。
+
+### 計測時間に含むもの
+
+**処理時間は、各バッチのドライバー呼び出し開始から応答までの合計です。** JSONでは`seconds`、CSVでは`driver_seconds`として保存します。
+
+| 含む処理 | 含まない処理 |
+|---|---|
+| ドライバー内部の処理・エンコード、ネットワーク往復、サーバー処理、呼び出し中のGC | データ生成・初期BSON生成・共通データ変換、バッチ/更新モデルの準備、接続、インデックス作成、更新前の初期投入、結果検証、レポート生成 |
+
+MongoDBはInsertMany/BulkWriteの応答まで、PostgreSQLはSendBatchから全SQLの応答とcommit応答を取得するCloseまでを測定します。サーバー内部だけの処理時間ではありません。
+
+別途、バッチ準備とループ処理を含む書き込みフェーズ全体の経過時間を`wall_seconds`として保存します。
+
+### 解釈上の注意
+
+- `-batch 1`でも同じバッチAPIを使います。MongoDBのInsertOne/UpdateOneの専用ベンチマークではありません。
+- 更新は初期投入直後の、キャッシュが温まった条件です。DB・OSキャッシュを消去しません。
+- 事前生成したデータをクライアントメモリに保持するため、件数に比例してクライアントのメモリも増えます。
+- データは小さく、件数を増やしても必ずキャッシュ超過を再現するわけではありません。
+- 挿入中にインデックスが成長します。一定サイズの既存データに追記する実験とは条件が異なります。
+- 他の負荷、CPU温度、ディスク、Docker VMのリソース、チェックポイント等の影響は残ります。条件順のシャッフルや5回の反復で消えるとは限りません。
 
 ## CLIオプションと接続設定
 
@@ -188,37 +222,62 @@ go run ./cmd/bench -help
 
 | オプション | 既定値 | 内容 |
 |---|---|---|
-| `-engines` | `mongodb` | `mongodb`、`postgresql`、または両方をカンマ区切りで実行順に指定 |
-| `-pg-fillfactor` | `100` | PostgreSQLテーブルのfillfactor（10〜100） |
-| `-serve` | `false` | ローカルの設定・実行画面を起動 |
-| `-listen` | `127.0.0.1:8080` | 画面の待ち受け先 |
-| `-sizes` | `100000,1000000` | 各試行のドキュメント数 |
-| `-indexes` | `0,1,5` | 追加本数。0〜5で0を含める |
+| `-engines` | `mongodb` | `mongodb`、`postgresql`、または両方を実行順にカンマ区切りで指定 |
+| `-sizes` | `100000,1000000` | 各試行のデータ件数 |
+| `-indexes` | `0,1,5` | 追加インデックス本数。0〜5で0を含める |
 | `-repeats` | `5` | 各条件の測定回数 |
 | `-batch` | `1000` | バッチ件数（1〜100000） |
-| `-seed` | `42` | データ・更新順・条件順のseed |
-| `-journal` | `false` | ジャーナル応答待ち |
-| `-timeout` | `2m` | 各DB操作のタイムアウト |
-| `-cooldown` | `1s` | セットアップ後の待機 |
-| `-notes` | 空 | マシン・ディスク・Docker設定など |
-| `-out` | `results/<UTC時刻>` | 新規出力ディレクトリ |
+| `-seed` | `42` | データ・更新順・条件順の乱数seed |
+| `-journal` | `false` | 永続化応答を待つ（MongoDB j:true / PostgreSQL synchronous_commit=on） |
+| `-pg-fillfactor` | `100` | PostgreSQLテーブルのfillfactor（10〜100） |
+| `-timeout` | `2m` | 各DB操作・セットアップ呼び出しのタイムアウト |
+| `-cooldown` | `1s` | 各試行のセットアップ後の待機時間 |
+| `-notes` | 空 | マシン・ディスク・Docker設定などの環境メモ |
+| `-out` | `results/<UTC時刻>` | 新規出力ディレクトリ。`-serve`では出力ルート（既定`results`） |
 | `-report` | 空 | 再生成元のJSONパス |
+| `-serve` | `false` | ローカルの設定・実行画面を起動 |
+| `-listen` | `127.0.0.1:8080` | 画面の待ち受け先 |
 
-接続先は環境変数`MONGODB_URI`（既定`mongodb://127.0.0.1:27018`）。URIは結果へ保存しません。接続ユーザーには専用DBの作成・書き込み・インデックス作成・統計参照・削除が必要です。プログラムは既存DB名を受け取らず、`index_write_bench_<ランダム文字列>`だけを使用します。強制終了・接続断では後片付けできないことがあるため、ログに作成したDB名を表示します。
+上記はCLIの既定値です。ブラウザ画面は、小規模で試せる初期設定を使います。
+
+### 接続先と作成・削除する領域
+
+| 環境変数 | 既定値 |
+|---|---|
+| `MONGODB_URI` | `mongodb://127.0.0.1:27018` |
+| `POSTGRES_URI` | `postgres://benchmark:benchmark@127.0.0.1:5433/benchmark?sslmode=disable` |
+
+既定のURIはDocker Composeによるローカル検証用です。URIや認証情報は結果へ保存しません。
+
+MongoDBは`index_write_bench_<ランダム文字列>`という専用DBを作成・削除します。接続ユーザーには専用DBの作成・書き込み・インデックス作成・統計参照・削除と、サーバーバージョン取得に必要な権限が必要です。
+
+PostgreSQLは接続先DB内に同様の名前の専用スキーマを作成し、そのスキーマを削除します。接続先DBは事前に用意し、接続ユーザーにはスキーマ作成とその中でのテーブル・インデックス作成、読み書き・削除に必要な権限を与えてください。
+
+強制終了・接続断では後片付けできないことがあります。作成したDB/スキーマ名はログに表示します。
 
 ## テストと検証
 
 ```sh
 go test ./...
 go vet ./...
-# Docker起動後：実際のMongoDBで全操作・全インデックス条件を確認
+```
+
+DB結合テストは、接続先の環境変数を設定した場合に実行します。
+
+```sh
+docker compose up -d --wait
 BENCH_TEST_URI=mongodb://127.0.0.1:27018 \
 BENCH_TEST_POSTGRES_URI='postgres://benchmark:benchmark@127.0.0.1:5433/benchmark?sslmode=disable' \
 go test -race ./...
 ```
 
-単体テストは条件網羅・再現性・集計・入力検証・HTMLへのJSON埋め込みを確認します。結合テストは23件を7件単位で書き込み、端数バッチも検証します。GitHub ActionsではMongoDBを起動して結合テストとCLIの実行、レポート再生成を行います。CIの小規模な実行は動作確認用で、性能の結論には使用しません。
+単体テストでは条件網羅・再現性・集計・入力検証・HTMLへのJSON埋め込みを確認します。両DBの結合テストは23件を7件単位で書き込み、全操作・全インデックス条件と端数バッチを検証します。PostgreSQLでは全行の更新値とスキーマ削除も検証します。HTTPの単体テストは設定検証・同時実行拒否・中断と途中保存・Origin/Host検証を確認します。
 
-参考：[MongoDB Write Operation Performance](https://www.mongodb.com/docs/manual/core/write-performance/)
+GitHub Actionsは`go.mod`のGoバージョンを使い、両DBの結合テスト、CLIでの比較レポート生成、実際のHTTPサーバーを使った設定・実行・中断、保存済みJSONからのレポート再生成を確認します。CIの小規模な実行は動作確認用で、性能の結論には使用しません。
 
-PostgreSQLの結合テストは全操作・全インデックス条件で全行の更新値とスキーマ削除を検証します。HTTPテストは設定検証・同時実行拒否・中断と途中保存・Origin/Host検証を確認します。CIは両DBの結合テスト・比較レポート生成を実施します。
+## 参考資料
+
+- [MongoDB Write Operation Performance](https://www.mongodb.com/docs/manual/core/write-performance/)
+- [PostgreSQL HOT](https://www.postgresql.org/docs/17/storage-hot.html)
+- [PostgreSQL synchronous_commit](https://www.postgresql.org/docs/17/runtime-config-wal.html#GUC-SYNCHRONOUS-COMMIT)
+- [pgx SendBatch](https://pkg.go.dev/github.com/jackc/pgx/v5#Conn.SendBatch)
