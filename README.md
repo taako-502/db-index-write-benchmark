@@ -285,6 +285,9 @@ go test -race ./...
 
 GitHub Actionsは`go.mod`のGoバージョンを使い、両DBの結合テスト、CLIでの比較レポート生成、実際のHTTPサーバーを使った設定・実行・中断、保存済みJSONからのレポート再生成を確認します。CIの小規模な実行は動作確認用で、性能の結論には使用しません。
 
+## ブログ記事
+https://ap-ep.com/db-index-write-overhead/
+
 ## 参考資料
 
 - [MongoDB Write Operation Performance](https://www.mongodb.com/docs/manual/core/write-performance/)
